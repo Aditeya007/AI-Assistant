@@ -1,2 +1,7 @@
 SPNV
 .env
+app_database.json
+temp/
+videos/
+Log/
+config/

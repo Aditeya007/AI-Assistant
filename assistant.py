@@ -3,8 +3,19 @@ import webbrowser
 import json
 import os
 import difflib
+from datetime import datetime
 from dotenv import load_dotenv
 from openai import OpenAI
+
+# ==========================================
+# 📦 SYSTEM CONTROL LIBRARIES
+# ==========================================
+import pyautogui
+import screen_brightness_control as sbc
+import comtypes
+from ctypes import cast, POINTER
+from comtypes import CLSCTX_ALL
+from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
 
 # Load API key
 load_dotenv()
@@ -20,11 +31,7 @@ MODEL = "llama-3.3-70b-versatile"
 # ============================================================
 # 🔧 CONFIGURATION: CUSTOM APPS & PATHS
 # ============================================================
-# Add your games or specific apps here if the scanner misses them.
-# Use double backslashes "\\" for paths.
-
 MY_CUSTOM_APPS = {
-    # Examples (You can add your own here):
     "marvel rivals": r"C:\Program Files (x86)\Steam\steamapps\common\MarvelRivals\Launcher.exe",
     "valorant": r"C:\Riot Games\Riot Client\RiotClientServices.exe",
     "obs": r"C:\Program Files\obs-studio\bin\64bit\obs64.exe",
@@ -33,7 +40,99 @@ MY_CUSTOM_APPS = {
 APP_INDEX_FILE = "app_database.json"
 
 # ============================================================
-# 🔍 INDEXING ENGINE (Runs once, then loads from file)
+# 🎛️ SYSTEM CONTROL ENGINE (Volume Fixed)
+# ============================================================
+
+def set_system_volume(level):
+    """
+    Sets the master volume. Level should be an integer between 0 and 100.
+    """
+    try:
+        level = max(0, min(100, int(level)))
+        scalar_volume = level / 100.0
+        
+        # Get the speakers (default audio device)
+        devices = AudioUtilities.GetSpeakers()
+        
+        # Activate the audio endpoint volume interface
+        interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+        volume = cast(interface, POINTER(IAudioEndpointVolume))
+        
+        # Set the volume
+        volume.SetMasterVolumeLevelScalar(scalar_volume, None)
+        print(f"🔊 Volume set to {level}%")
+        
+    except Exception as e:
+        print(f"❌ Error setting volume: {e}")
+        print("Trying alternative method...")
+        
+        # Alternative: Direct COM access
+        try:
+            from comtypes import GUID
+            
+            # Device enumerator CLSID
+            CLSID_MMDeviceEnumerator = GUID('{BCDE0395-E52F-467C-8E3D-C4579291692E}')
+            IID_IMMDeviceEnumerator = GUID('{A95664D2-9614-4F35-A746-DE8DB63617E6}')
+            
+            # Create device enumerator
+            enumerator = comtypes.CoCreateInstance(
+                CLSID_MMDeviceEnumerator,
+                comtypes.IUnknown,
+                CLSCTX_ALL
+            )
+            
+            from pycaw.pycaw import IMMDeviceEnumerator, EDataFlow, ERole
+            enumerator = enumerator.QueryInterface(IMMDeviceEnumerator)
+            
+            # Get default audio output device
+            endpoint = enumerator.GetDefaultAudioEndpoint(0, 1)  # eRender, eMultimedia
+            
+            # Activate volume control
+            interface = endpoint.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+            volume = cast(interface, POINTER(IAudioEndpointVolume))
+            
+            # Set volume
+            volume.SetMasterVolumeLevelScalar(scalar_volume, None)
+            print(f"🔊 Volume set to {level}% (alternative method)")
+            
+        except Exception as e2:
+            print(f"❌ Alternative method failed: {e2}")
+
+def set_system_brightness(level):
+    """
+    Sets the screen brightness. Level should be an integer between 0 and 100.
+    """
+    try:
+        level = max(0, min(100, int(level)))
+        sbc.set_brightness(level)
+        print(f"☀️ Brightness set to {level}%")
+    except Exception as e:
+        print(f"❌ Error setting brightness: {e}")
+
+def take_screenshot():
+    """
+    Takes a screenshot of the entire screen and saves it to a 'Screenshots' folder.
+    """
+    try:
+        folder_name = "Screenshots"
+        if not os.path.exists(folder_name):
+            os.makedirs(folder_name)
+            
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        filename = f"screenshot_{timestamp}.png"
+        filepath = os.path.join(folder_name, filename)
+        
+        screenshot = pyautogui.screenshot()
+        screenshot.save(filepath)
+        
+        print(f"📸 Screenshot saved to: {filepath}")
+        return filepath
+    except Exception as e:
+        print(f"❌ Error taking screenshot: {e}")
+        return None
+
+# ============================================================
+# 🔍 INDEXING ENGINE (Deep Scan Restored)
 # ============================================================
 
 def build_app_index():
@@ -42,11 +141,10 @@ def build_app_index():
     
     app_map = {}
 
-    # 1. ADD CUSTOM APPS (Highest Priority)
+    # 1. ADD CUSTOM APPS
     app_map.update(MY_CUSTOM_APPS)
 
-    # 2. ADD SYSTEM COMMANDS (Windows defaults)
-    # These fix the "Open Calculator" or "Open Notepad" issues.
+    # 2. ADD SYSTEM COMMANDS
     system_commands = {
         "calculator": "calc", "calc": "calc",
         "notepad": "notepad", "paint": "mspaint",
@@ -58,7 +156,7 @@ def build_app_index():
     }
     app_map.update(system_commands)
 
-    # 3. SCAN START MENU & DESKTOP (Shortcuts are the most reliable)
+    # 3. SCAN START MENU & DESKTOP (Shortcuts)
     shortcut_dirs = [
         os.path.join(os.getenv("APPDATA"), r"Microsoft\Windows\Start Menu"),
         os.path.join(os.getenv("ProgramData"), r"Microsoft\Windows\Start Menu"),
@@ -75,13 +173,12 @@ def build_app_index():
                         name = file.rsplit(".", 1)[0].lower()
                         app_map[name] = os.path.join(root, file)
 
-    # 4. DEEP SCAN PROGRAM FILES (Finds installed .exe directly)
+    # 4. DEEP SCAN PROGRAM FILES (The "Heavy" Logic)
     print("   - Scanning Program Files (Deep Search)...")
     
     search_roots = [
         os.environ.get("ProgramFiles"),
         os.environ.get("ProgramFiles(x86)"),
-        # os.path.join(os.environ.get("SystemDrive"), "Games") # Optional: Add if you have a Games folder
     ]
 
     skip_keywords = ["uninstall", "setup", "update", "helper", "crash", "installer", "framework", "service", "system32"]
@@ -90,7 +187,7 @@ def build_app_index():
         if not root_dir or not os.path.exists(root_dir): continue
         
         for root, dirs, files in os.walk(root_dir):
-            # Optimization: Skip huge system folders to speed up scan
+            # Optimization: Skip huge system folders
             if "Windows" in root or "Common Files" in root: 
                 continue
                 
@@ -98,7 +195,6 @@ def build_app_index():
                 if file.lower().endswith(".exe"):
                     name = file.lower().replace(".exe", "")
                     
-                    # Filter out junk EXEs
                     if any(bad in name for bad in skip_keywords): continue
                     
                     # Only add if not already found (Shortcuts take priority)
@@ -114,7 +210,6 @@ def build_app_index():
     return app_map
 
 def load_app_index():
-    # If the file exists, load it instantly (No scanning!)
     if os.path.exists(APP_INDEX_FILE):
         try:
             print("📂 Loading app database...")
@@ -125,10 +220,8 @@ def load_app_index():
         except:
             print("⚠️ Database corrupt. Rebuilding...")
     
-    # If file doesn't exist, build it
     return build_app_index()
 
-# Load index on startup
 APP_INDEX = load_app_index()
 
 # ============================================================
@@ -139,14 +232,12 @@ def open_app(app_name):
     if not app_name: return
     query = app_name.lower().strip()
 
-    # 1. Exact Match
     if query in APP_INDEX:
         print(f"🚀 Opening: {query}")
         try: os.startfile(APP_INDEX[query])
         except Exception as e: print(f"❌ Failed to open: {e}")
         return
 
-    # 2. Fuzzy Match (Smart Guess)
     matches = difflib.get_close_matches(query, APP_INDEX.keys(), n=1, cutoff=0.4)
     if matches:
         best = matches[0]
@@ -155,37 +246,26 @@ def open_app(app_name):
         except Exception as e: print(f"❌ Failed to open: {e}")
         return
 
-    # 3. Substring Match (Fallback)
-    for key in APP_INDEX:
-        if query in key:
-            print(f"🚀 Opening: {key}")
-            try: os.startfile(APP_INDEX[key])
-            except: pass
-            return
-    
-    print(f"❌ App '{app_name}' not found.")
-    print("👉 Tip: Add the path to 'MY_CUSTOM_APPS' in the Python script, or type 'refresh'.")
-
-def open_website(url):
-    if not url.startswith("http"): url = "https://" + url
-    print(f"🌐 Opening: {url}")
-    webbrowser.open(url)
+    print(f"❌ App '{app_name}' not found. Try 'refresh' to rescan.")
 
 def ask_llm(user_input):
-    # AI generates the URL dynamically for ANY website
     prompt = f"""
     Act as a desktop assistant. Return JSON ONLY.
     
-    1. OPEN APP: {{ "action": "open_app", "app_name": "name" }}
+    1. APP CONTROL: {{ "action": "open_app", "app_name": "name" }}
     
-    2. SEARCH SPECIFIC SITE: 
-       - Generate the search URL for the site yourself.
-       - Examples:
-         - "Search Amazon for ps5" -> {{ "action": "open_website", "url": "https://www.amazon.com/s?k=ps5" }}
-         - "Search Reddit for news" -> {{ "action": "open_website", "url": "https://www.reddit.com/search/?q=news" }}
-         - "Search ChatGPT for python" -> {{ "action": "open_website", "url": "https://chatgpt.com/?q=python" }}
+    2. SYSTEM CONTROL (Volume/Brightness):
+       - Extract the number (0-100). If user says "max", use 100. "Mute" is 0.
+       - "Set volume to 50%" -> {{ "action": "set_volume", "value": 50 }}
+       - "Brightness 20" -> {{ "action": "set_brightness", "value": 20 }}
     
-    3. GENERAL SEARCH: {{ "action": "google_search", "query": "your query" }}
+    3. SCREENSHOT:
+       - "Take a screenshot" -> {{ "action": "take_screenshot" }}
+    
+    4. SEARCH SPECIFIC SITE: 
+       - "Search Amazon for ps5" -> {{ "action": "open_website", "url": "https://www.amazon.com/s?k=ps5" }}
+    
+    5. GENERAL SEARCH: {{ "action": "google_search", "query": "your query" }}
 
     User: "{user_input}"
     """
@@ -208,8 +288,9 @@ def ask_llm(user_input):
 
 def main():
     print("\n===========================================")
-    print("  🤖 AI DESKTOP ASSISTANT (Final Version)")
+    print(" 🤖 AI DESKTOP ASSISTANT (v2.2 - Final)")
     print("===========================================")
+    print("• Try: 'Set volume to 50%' or 'Dim screen to 10%'")
     print("• Type 'refresh' to re-scan your PC.")
     print("• Type 'exit' to quit.\n")
 
@@ -219,7 +300,6 @@ def main():
         
         if user_input.lower() in ["exit", "quit"]: break
         
-        # Force re-scan command
         if user_input.lower() == "refresh":
             global APP_INDEX
             APP_INDEX = build_app_index() 
@@ -234,11 +314,23 @@ def main():
                 open_app(data.get("app_name"))
                 
             elif action == "open_website": 
-                open_website(data.get("url"))
+                print(f"🌐 Opening URL...")
+                webbrowser.open(data.get("url"))
                 
             elif action == "google_search": 
                 print(f"🔍 Google: {data.get('query')}")
                 webbrowser.open(f"[https://www.google.com/search?q=](https://www.google.com/search?q=){data.get('query').replace(' ', '+')}")
+            
+            # --- NEW SYSTEM HANDLERS ---
+            elif action == "set_volume":
+                set_system_volume(data.get("value"))
+                
+            elif action == "set_brightness":
+                set_system_brightness(data.get("value"))
+                
+            elif action == "take_screenshot":
+                take_screenshot()
+            # ---------------------------
             
             else: 
                 print("❌ Unknown command.")

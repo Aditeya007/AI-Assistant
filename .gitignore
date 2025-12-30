@@ -6,3 +6,5 @@ videos/
 Log/
 config/
 Screenshots/
+__pycache__/
+Log

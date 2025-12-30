@@ -41,6 +41,32 @@ PERSONALITY = (
     "Observant first, clever second, decisive when needed."
 )
 
+# ----- New: short-term context memory and routines -----
+STATE = {
+    'last_action': None,
+    'last_opened_app': None,
+    'last_volume': None,
+    'prev_volume': None,
+    'last_brightness': None,
+    'prev_brightness': None,
+    'pending_action': None,
+}
+
+# Simple named routines. Each routine is a list of (action, arg) pairs.
+ROUTINES = {
+    'gaming': [
+        ('set_volume', 80),
+        ('set_brightness', 40),
+        ('open_app', 'valorant')
+    ],
+    'work': [
+        ('set_volume', 30),
+        ('set_brightness', 60),
+        ('open_app', 'notepad')
+    ]
+}
+
+
 
 def persona_response(kind, **kwargs):
     """Return a short, varied reply in Ezio's persona.
@@ -116,6 +142,13 @@ def set_system_volume(level):
         interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
         volume = cast(interface, POINTER(IAudioEndpointVolume))
         volume.SetMasterVolumeLevelScalar(scalar_volume, None)
+        # update short-term state
+        try:
+            STATE['prev_volume'] = STATE.get('last_volume')
+            STATE['last_volume'] = level
+            STATE['last_action'] = 'set_volume'
+        except Exception:
+            pass
         return True, level
 
     except Exception:
@@ -137,6 +170,12 @@ def set_system_volume(level):
             interface = endpoint.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
             volume = cast(interface, POINTER(IAudioEndpointVolume))
             volume.SetMasterVolumeLevelScalar(scalar_volume, None)
+            try:
+                STATE['prev_volume'] = STATE.get('last_volume')
+                STATE['last_volume'] = level
+                STATE['last_action'] = 'set_volume'
+            except Exception:
+                pass
             return True, level
 
         except Exception as e2:
@@ -149,6 +188,12 @@ def set_system_brightness(level):
     try:
         level = max(0, min(100, int(level)))
         sbc.set_brightness(level)
+        try:
+            STATE['prev_brightness'] = STATE.get('last_brightness')
+            STATE['last_brightness'] = level
+            STATE['last_action'] = 'set_brightness'
+        except Exception:
+            pass
         return True, level
     except Exception as e:
         return False, str(e)
@@ -169,6 +214,11 @@ def take_screenshot():
         screenshot = pyautogui.screenshot()
         screenshot.save(filepath)
 
+        try:
+            STATE['last_action'] = 'take_screenshot'
+            STATE['last_screenshot'] = filepath
+        except Exception:
+            pass
         return True, filepath
     except Exception as e:
         return False, str(e)
@@ -274,6 +324,11 @@ def open_app(app_name):
     if query in APP_INDEX:
         try:
             os.startfile(APP_INDEX[query])
+            try:
+                STATE['last_opened_app'] = query
+                STATE['last_action'] = 'open_app'
+            except Exception:
+                pass
             return True, query
         except Exception as e:
             return False, str(e)
@@ -283,11 +338,149 @@ def open_app(app_name):
         best = matches[0]
         try:
             os.startfile(APP_INDEX[best])
+            try:
+                STATE['last_opened_app'] = best
+                STATE['last_action'] = 'open_app'
+            except Exception:
+                pass
             return True, best
         except Exception as e:
             return False, str(e)
 
     return False, f"not_found:{app_name}"
+
+
+def execute_action(action, data=None):
+    """Central action dispatcher.
+
+    Handles: open_app, set_volume, set_brightness, take_screenshot,
+    open_website, google_search, run_routine.
+
+    Prints persona_response() for user-facing output and updates STATE.
+    Returns (ok: bool, info: any).
+    """
+    if not action:
+        print(persona_response('unknown'))
+        return False, 'no_action'
+
+    a = action.lower()
+
+    # open_app
+    if a == 'open_app':
+        if isinstance(data, dict):
+            name = data.get('app_name') or data.get('name') or data.get('app')
+        else:
+            name = data
+        ok, info = open_app(name)
+        if ok:
+            print(persona_response('open_app_ok', name=info))
+        else:
+            if isinstance(info, str) and info.startswith('not_found:'):
+                nm = info.split(':', 1)[1]
+                print(persona_response('open_app_not_found', name=nm))
+            else:
+                print(persona_response('error', msg=info))
+        return ok, info
+
+    # set_volume
+    if a == 'set_volume':
+        if isinstance(data, dict):
+            val = data.get('value') or data.get('volume')
+        else:
+            val = data
+        ok, info = set_system_volume(val)
+        if ok:
+            print(persona_response('volume', value=info))
+        else:
+            print(persona_response('error', msg=info))
+        return ok, info
+
+    # set_brightness
+    if a == 'set_brightness':
+        if isinstance(data, dict):
+            val = data.get('value') or data.get('brightness')
+        else:
+            val = data
+        ok, info = set_system_brightness(val)
+        if ok:
+            print(persona_response('brightness', value=info))
+        else:
+            print(persona_response('error', msg=info))
+        return ok, info
+
+    # take_screenshot
+    if a == 'take_screenshot':
+        ok, info = take_screenshot()
+        if ok:
+            print(persona_response('screenshot', path=info))
+        else:
+            print(persona_response('error', msg=info))
+        return ok, info
+
+    # open_website
+    if a == 'open_website':
+        if isinstance(data, dict):
+            url = data.get('url') or data.get('value')
+        else:
+            url = data
+        if not url:
+            print(persona_response('error', msg='no_url'))
+            return False, 'no_url'
+        webbrowser.open(url)
+        try:
+            STATE['last_action'] = 'open_website'
+            STATE['last_website'] = url
+        except Exception:
+            pass
+        print(persona_response('open_website'))
+        return True, url
+
+    # google_search
+    if a == 'google_search':
+        if isinstance(data, dict):
+            query = data.get('query') or data.get('q') or data.get('value')
+        else:
+            query = data
+        if not query:
+            print(persona_response('error', msg='no_query'))
+            return False, 'no_query'
+        webbrowser.open(f"https://www.google.com/search?q={str(query).replace(' ', '+')}")
+        try:
+            STATE['last_action'] = 'google_search'
+            STATE['last_search'] = query
+        except Exception:
+            pass
+        print(persona_response('google_search', query=query))
+        return True, query
+
+    # run_routine
+    if a == 'run_routine':
+        if isinstance(data, dict):
+            name = data.get('name') or data.get('routine') or data.get('value')
+        else:
+            name = data
+        if not name or name not in ROUTINES:
+            print(persona_response('error', msg='no_routine'))
+            return False, 'no_routine'
+        steps = ROUTINES.get(name, [])
+        try:
+            STATE['last_action'] = 'run_routine'
+            STATE['last_routine'] = name
+        except Exception:
+            pass
+        for step in steps:
+            if not isinstance(step, (list, tuple)) or len(step) < 1:
+                continue
+            step_act = step[0]
+            step_arg = step[1] if len(step) > 1 else None
+            ok, info = execute_action(step_act, step_arg)
+            if not ok:
+                return False, f"routine_failed:{step_act}:{info}"
+        return True, name
+
+    # unknown
+    print(persona_response('unknown'))
+    return False, 'unknown_action'
 
 def ask_llm(user_input):
     prompt = f"""
@@ -371,54 +564,109 @@ def assist_mode():
             APP_INDEX = build_app_index() 
             continue
 
-        data = ask_llm(user_input)
-        
-        if data:
-            action = data.get("action")
-
-            if action == "open_app":
-                ok, info = open_app(data.get("app_name"))
-                if ok:
-                    print(persona_response('open_app_ok', name=info))
-                else:
-                    if isinstance(info, str) and info.startswith("not_found:"):
-                        name = info.split(":", 1)[1]
-                        print(persona_response('open_app_not_found', name=name))
+        # --- Handle pending confirmations (yes/no) for risky actions ---
+        if STATE.get('pending_action') is not None:
+            ans = user_input.strip().lower()
+            if ans in ('yes', 'no'):
+                pending = STATE.pop('pending_action')
+                if ans == 'yes':
+                    act = pending.get('action')
+                    if act == 'shutdown':
+                        print(persona_response('open_website'))
+                        os.system('shutdown /s /t 0')
+                    elif act == 'restart':
+                        print(persona_response('open_website'))
+                        os.system('shutdown /r /t 0')
                     else:
-                        print(persona_response('error', msg=info))
+                        print(persona_response('open_website'))
+                else:
+                    print(persona_response('unknown'))
+            else:
+                print(persona_response('unknown'))
+            continue
 
-            elif action == "open_website":
-                webbrowser.open(data.get("url"))
-                print(persona_response('open_website'))
-
-            elif action == "google_search":
-                query = data.get('query')
-                webbrowser.open(f"https://www.google.com/search?q={query.replace(' ', '+')}")
-                print(persona_response('google_search', query=query))
-
-            elif action == "set_volume":
-                ok, info = set_system_volume(data.get("value"))
+        # --- Handle follow-up/local commands without calling the LLM ---
+        lu = user_input.strip().lower()
+        # Undo / revert
+        if lu in ('undo', 'revert', 'revert that'):
+            if STATE.get('last_action') == 'set_volume' and STATE.get('prev_volume') is not None:
+                ok, info = set_system_volume(STATE['prev_volume'])
                 if ok:
                     print(persona_response('volume', value=info))
                 else:
                     print(persona_response('error', msg=info))
-
-            elif action == "set_brightness":
-                ok, info = set_system_brightness(data.get("value"))
+                continue
+            if STATE.get('last_action') == 'set_brightness' and STATE.get('prev_brightness') is not None:
+                ok, info = set_system_brightness(STATE['prev_brightness'])
                 if ok:
                     print(persona_response('brightness', value=info))
                 else:
                     print(persona_response('error', msg=info))
+                continue
 
-            elif action == "take_screenshot":
-                ok, info = take_screenshot()
+        # relative adjustments and repeats
+        if 'lower it' in lu or 'decrease it' in lu:
+            if STATE.get('last_action') == 'set_volume' and STATE.get('last_volume') is not None:
+                new = max(0, STATE['last_volume'] - 10)
+                ok, info = set_system_volume(new)
                 if ok:
-                    print(persona_response('screenshot', path=info))
+                    print(persona_response('volume', value=info))
                 else:
                     print(persona_response('error', msg=info))
+                continue
+            if STATE.get('last_action') == 'set_brightness' and STATE.get('last_brightness') is not None:
+                new = max(0, STATE['last_brightness'] - 10)
+                ok, info = set_system_brightness(new)
+                if ok:
+                    print(persona_response('brightness', value=info))
+                else:
+                    print(persona_response('error', msg=info))
+                continue
 
-            else:
+        if 'increase it' in lu or 'raise it' in lu or 'turn it up' in lu:
+            if STATE.get('last_action') == 'set_volume' and STATE.get('last_volume') is not None:
+                new = min(100, STATE['last_volume'] + 10)
+                ok, info = set_system_volume(new)
+                if ok:
+                    print(persona_response('volume', value=info))
+                else:
+                    print(persona_response('error', msg=info))
+                continue
+            if STATE.get('last_action') == 'set_brightness' and STATE.get('last_brightness') is not None:
+                new = min(100, STATE['last_brightness'] + 10)
+                ok, info = set_system_brightness(new)
+                if ok:
+                    print(persona_response('brightness', value=info))
+                else:
+                    print(persona_response('error', msg=info))
+                continue
+
+        if 'open it again' in lu or 'open again' in lu or 'open it' == lu:
+            last = STATE.get('last_opened_app')
+            if last:
+                ok, info = open_app(last)
+                if ok:
+                    print(persona_response('open_app_ok', name=info))
+                else:
+                    print(persona_response('error', msg=info))
+                continue
+
+        data = ask_llm(user_input)
+
+        if data:
+            action = data.get("action")
+
+            # Keep risky confirmations local (shutdown/restart)
+            if action in ('shutdown', 'restart'):
+                STATE['pending_action'] = {'action': action}
                 print(persona_response('unknown'))
+                continue
+
+            # Delegate execution to the central dispatcher
+            ok, info = execute_action(action, data)
+            # execute_action already prints persona_response for user-facing output
+            # we simply continue; callers can inspect ok/info if needed
+            continue
 
 def main_menu():
     print("\n===========================================")

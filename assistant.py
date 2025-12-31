@@ -14,6 +14,8 @@ import comtypes
 from ctypes import cast, POINTER
 from comtypes import CLSCTX_ALL
 from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+import threading
+import time
 
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -52,6 +54,58 @@ STATE = {
     'prev_brightness': None,
     'pending_action': None,
 }
+
+# ----- Autonomous Agent: Internal Motivation State -----
+# These values drive the agent's decision to self-initiate conversation
+# NOT based on schedules or timers, but on internal cognitive processes
+MOTIVATION_STATE = {
+    'cognitive_pressure': 0.0,       # Accumulates when system shows patterns worth noting (0.0 - 1.0)
+    'curiosity': 0.0,                # Increases with prolonged system observation (0.0 - 1.0)
+    'confidence_to_initiate': 0.7,   # Agent's willingness to speak unprompted (0.0 - 1.0)
+    'last_initiation_time': None,    # Timestamp of last self-initiated conversation
+    'silence_duration': 0.0,         # Seconds since last user interaction
+    'last_user_interaction': time.time(),  # Timestamp of last user input
+    'observation_count': 0,          # Number of observation cycles completed
+    'notable_observations': [],      # Recent system patterns detected
+}
+
+# Thread-safe lock for MOTIVATION_STATE updates
+motivation_lock = threading.Lock()
+
+# ----- Autonomous Agent: Self-Model (Behavioral Identity) -----
+# Represents HOW the agent behaves, not WHAT it thinks or feels
+# This is NOT personality — this is behavioral configuration that evolves
+# Values change slowly based on reflection, creating consistent entity behavior
+SELF_MODEL = {
+    'interruptiveness': 0.3,        # How easily agent speaks (0.0=never, 1.0=always) - LOW by default
+    'risk_aversion': 0.8,            # How cautious before speaking (0.0=bold, 1.0=cautious) - HIGH by default
+    'curiosity_bias': 0.5,           # Weight given to curiosity vs pressure (0.0=ignore, 1.0=dominant)
+    'speech_reluctance': 0.7,        # Preference for silence (0.0=chatty, 1.0=silent) - HIGH by default
+    'self_summary': 'observant, restrained, speaks only when internally justified',  # Internal behavioral description
+}
+
+# ----- Base Self-Model: Immutable Baseline (Homeostatic Anchor) -----
+# Prevents long-term identity drift by providing gravitational pull
+# SELF_MODEL slowly drifts back toward this baseline during reflection
+# Ensures agent maintains core behavioral identity over time
+BASE_SELF_MODEL = {
+    'interruptiveness': 0.3,
+    'risk_aversion': 0.8,
+    'curiosity_bias': 0.5,
+    'speech_reluctance': 0.7,
+}
+
+# ----- Behavioral Self-Memory (Internal Awareness) -----
+# NOT chat history — this is the agent's memory of its OWN behavior patterns
+# Used for context-aware reflection and self-observation
+# Bounded rolling buffer (keeps last 50 entries)
+BEHAVIOR_LOG = []  # List of behavioral events
+MAX_BEHAVIOR_LOG_SIZE = 50
+
+# System state history for novelty detection
+# Tracks recent system states to detect meaningful changes
+SYSTEM_STATE_HISTORY = []  # Rolling buffer of recent observations
+MAX_STATE_HISTORY_SIZE = 20  # ~10 minutes of history at 30s intervals
 
 # Simple named routines. Each routine is a list of (action, arg) pairs.
 ROUTINES = {
@@ -261,6 +315,607 @@ def get_system_status():
     if not parts:
         return "System stats unavailable"
     return " | ".join(parts)
+
+
+def observe_system_state():
+    """
+    Gather current system state for autonomous decision-making.
+    Returns dict with CPU, RAM, battery, time info.
+    Called by autonomous background loop, not by user.
+    """
+    state = {
+        'cpu': None,
+        'ram': None,
+        'battery_percent': None,
+        'battery_plugged': None,
+        'hour': datetime.now().hour,
+        'processes': 0,
+        'timestamp': time.time(),
+    }
+    
+    try:
+        state['cpu'] = psutil.cpu_percent(interval=0.2)
+    except Exception:
+        pass
+    
+    try:
+        state['ram'] = psutil.virtual_memory().percent
+    except Exception:
+        pass
+    
+    try:
+        batt = psutil.sensors_battery()
+        if batt:
+            state['battery_percent'] = batt.percent
+            state['battery_plugged'] = batt.power_plugged
+    except Exception:
+        pass
+    
+    try:
+        state['processes'] = len(psutil.pids())
+    except Exception:
+        pass
+    
+    return state
+
+
+def log_behavior_event(event_type, trigger_factors, outcome):
+    """
+    Record a behavioral event in the agent's self-memory.
+    
+    This is NOT chat history — this is internal awareness of own behavior.
+    Used for context-aware reflection and pattern detection.
+    
+    event_type: 'spoke', 'suppressed', 'extended_silence'
+    trigger_factors: dict with pressure, curiosity, self_model snapshot
+    outcome: 'justified', 'unnecessary', 'neutral'
+    """
+    global BEHAVIOR_LOG
+    
+    entry = {
+        'timestamp': time.time(),
+        'event_type': event_type,
+        'trigger_factors': trigger_factors.copy() if trigger_factors else {},
+        'outcome': outcome,
+    }
+    
+    BEHAVIOR_LOG.append(entry)
+    
+    # Maintain bounded buffer
+    if len(BEHAVIOR_LOG) > MAX_BEHAVIOR_LOG_SIZE:
+        BEHAVIOR_LOG.pop(0)
+
+
+def detect_novelty(current_state):
+    """
+    Detect novelty in system state by comparing to recent history.
+    
+    Novelty increases curiosity when system shows meaningful changes:
+    - Significant CPU/RAM shifts
+    - Process count changes
+    - Battery state transitions
+    
+    Returns novelty_score (0.0 - 1.0)
+    """
+    global SYSTEM_STATE_HISTORY
+    
+    if len(SYSTEM_STATE_HISTORY) < 3:
+        # Not enough history — low novelty
+        return 0.1
+    
+    novelty = 0.0
+    
+    # Get recent average for comparison
+    recent = SYSTEM_STATE_HISTORY[-5:] if len(SYSTEM_STATE_HISTORY) >= 5 else SYSTEM_STATE_HISTORY
+    
+    # CPU novelty
+    if current_state.get('cpu') is not None:
+        cpu_values = [s.get('cpu') for s in recent if s.get('cpu') is not None]
+        if cpu_values:
+            avg_cpu = sum(cpu_values) / len(cpu_values)
+            cpu_delta = abs(current_state['cpu'] - avg_cpu)
+            novelty += min(0.3, cpu_delta / 100.0)  # Up to 0.3 contribution
+    
+    # RAM novelty
+    if current_state.get('ram') is not None:
+        ram_values = [s.get('ram') for s in recent if s.get('ram') is not None]
+        if ram_values:
+            avg_ram = sum(ram_values) / len(ram_values)
+            ram_delta = abs(current_state['ram'] - avg_ram)
+            novelty += min(0.3, ram_delta / 100.0)  # Up to 0.3 contribution
+    
+    # Process count change (indicates activity shift)
+    if current_state.get('processes'):
+        proc_values = [s.get('processes') for s in recent if s.get('processes')]
+        if proc_values:
+            avg_procs = sum(proc_values) / len(proc_values)
+            proc_delta = abs(current_state['processes'] - avg_procs)
+            # Significant if >10 process change
+            novelty += min(0.2, proc_delta / 50.0)  # Up to 0.2 contribution
+    
+    # Battery state transition (plugged/unplugged)
+    if current_state.get('battery_plugged') is not None:
+        prev_plugged = [s.get('battery_plugged') for s in recent[-3:] if s.get('battery_plugged') is not None]
+        if prev_plugged and prev_plugged[-1] != current_state['battery_plugged']:
+            novelty += 0.2  # State transition is notable
+    
+    return min(1.0, novelty)
+
+
+def analyze_self_behavior():
+    """
+    SELF-OBSERVATION: Analyze agent's own behavioral patterns.
+    
+    Generates internal awareness signals such as:
+    - Speaking more than usual
+    - Extended silence beyond norm
+    - Pressure accumulation without action
+    
+    These signals influence motivation/reflection but are NOT always spoken.
+    Returns dict of self-observation metrics.
+    """
+    if len(BEHAVIOR_LOG) < 5:
+        return {'speaking_frequency': 'insufficient_data', 'silence_pattern': 'establishing'}
+    
+    now = time.time()
+    recent_window = 3600 * 12  # Last 12 hours
+    recent_events = [e for e in BEHAVIOR_LOG if now - e['timestamp'] < recent_window]
+    
+    # Count self-initiated speech in recent period
+    speech_events = [e for e in recent_events if e['event_type'] == 'spoke']
+    suppressed_events = [e for e in recent_events if e['event_type'] == 'suppressed']
+    
+    observations = {}
+    
+    # Speaking frequency analysis
+    if len(speech_events) > 3:
+        observations['speaking_frequency'] = 'elevated'
+    elif len(speech_events) == 0 and len(recent_events) > 10:
+        observations['speaking_frequency'] = 'minimal'
+    else:
+        observations['speaking_frequency'] = 'normal'
+    
+    # Suppression pattern (internal restraint)
+    if len(suppressed_events) > len(speech_events) * 2:
+        observations['restraint_pattern'] = 'high_suppression'  # Agent is holding back frequently
+    
+    # Extended silence detection
+    silence = MOTIVATION_STATE['silence_duration']
+    if silence > 2400:  # >40 minutes
+        observations['silence_pattern'] = 'extended'
+    
+    # Pressure accumulation analysis
+    if MOTIVATION_STATE['cognitive_pressure'] > 0.6 and len(speech_events) == 0:
+        observations['pressure_state'] = 'accumulating_unsatisfied'
+    
+    return observations
+
+
+def update_motivation_from_observation(sys_state):
+    """
+    Update internal motivation values based on system observation.
+    This is the INTERNAL COGNITION — decides what matters, not when to speak.
+    
+    Cognitive pressure increases when system shows patterns worth noting.
+    Curiosity increases with prolonged observation without user interaction.
+    """
+    with motivation_lock:
+        # Increase silence duration
+        now = time.time()
+        MOTIVATION_STATE['silence_duration'] = now - MOTIVATION_STATE['last_user_interaction']
+        
+        # Increment observation count
+        MOTIVATION_STATE['observation_count'] += 1
+        
+        # --- COGNITIVE PRESSURE: Detect patterns worth noting ---
+        pressure_delta = 0.0
+        
+        # High CPU sustained
+        if sys_state.get('cpu') and sys_state['cpu'] > 85:
+            pressure_delta += 0.05
+            if 'high_cpu' not in MOTIVATION_STATE['notable_observations']:
+                MOTIVATION_STATE['notable_observations'].append('high_cpu')
+        
+        # High RAM sustained
+        if sys_state.get('ram') and sys_state['ram'] > 85:
+            pressure_delta += 0.05
+            if 'high_ram' not in MOTIVATION_STATE['notable_observations']:
+                MOTIVATION_STATE['notable_observations'].append('high_ram')
+        
+        # Battery low and not plugged
+        if sys_state.get('battery_percent') and sys_state['battery_percent'] < 20:
+            if not sys_state.get('battery_plugged'):
+                pressure_delta += 0.08
+                if 'battery_low' not in MOTIVATION_STATE['notable_observations']:
+                    MOTIVATION_STATE['notable_observations'].append('battery_low')
+        
+        # Late night hours (unusual activity pattern)
+        if sys_state.get('hour'):
+            if sys_state['hour'] >= 1 and sys_state['hour'] <= 4:
+                pressure_delta += 0.02
+        
+        # Update cognitive pressure (capped at 1.0)
+        MOTIVATION_STATE['cognitive_pressure'] = min(1.0, 
+            MOTIVATION_STATE['cognitive_pressure'] + pressure_delta)
+        
+        # --- CURIOSITY: Based on NOVELTY, not just silence ---
+        # Curiosity increases when system state meaningfully changes
+        # Store current state in history for novelty detection
+        global SYSTEM_STATE_HISTORY
+        SYSTEM_STATE_HISTORY.append(sys_state)
+        if len(SYSTEM_STATE_HISTORY) > MAX_STATE_HISTORY_SIZE:
+            SYSTEM_STATE_HISTORY.pop(0)
+        
+        # Detect novelty in current observation
+        novelty_score = detect_novelty(sys_state)
+        
+        # Curiosity increases with novelty (meaningful system changes)
+        if novelty_score > 0.3:
+            curiosity_delta = 0.02 * novelty_score
+            MOTIVATION_STATE['curiosity'] = min(1.0, 
+                MOTIVATION_STATE['curiosity'] + curiosity_delta)
+        
+        # Slight curiosity increase during prolonged silence (but much weaker than before)
+        # This prevents total dormancy but doesn't dominate
+        if MOTIVATION_STATE['silence_duration'] > 1200:  # > 20 minutes
+            MOTIVATION_STATE['curiosity'] = min(1.0, 
+                MOTIVATION_STATE['curiosity'] + 0.005)
+        
+        # Natural decay of pressure and curiosity (prevents perpetual accumulation)
+        # Only decay if no strong signals
+        if pressure_delta < 0.02:
+            MOTIVATION_STATE['cognitive_pressure'] *= 0.98
+        if novelty_score < 0.2 and MOTIVATION_STATE['silence_duration'] < 300:
+            MOTIVATION_STATE['curiosity'] *= 0.99
+        
+        # Internal confidence recovery (gradual, NOT user-triggered)
+        # Confidence must evolve during observation, not during decision evaluation
+        # Recovery occurs during successful restraint (low pressure + extended silence)
+        if MOTIVATION_STATE['cognitive_pressure'] < 0.3 and MOTIVATION_STATE['silence_duration'] > 1800:
+            MOTIVATION_STATE['confidence_to_initiate'] = min(0.7, 
+                MOTIVATION_STATE['confidence_to_initiate'] + 0.005)
+
+
+def wants_to_initiate_conversation():
+    """
+    DECISION LOGIC: Does the agent want to speak?
+    
+    Decision is based purely on internal state:
+    - cognitive_pressure (something worth noting)
+    - curiosity (prolonged observation)
+    - confidence_to_initiate (restraint/willingness)
+    - silence_duration (respect user's time)
+    - SELF_MODEL parameters (behavioral identity)
+    
+    SELF_MODEL modulates behavior, creating consistent entity identity.
+    Two agents with different self-models behave differently.
+    
+    Returns True if agent internally decides to speak.
+    NO schedules. NO timers. NO random pings.
+    """
+    with motivation_lock:
+        # Calculate time penalty (modulates motivation, doesn't veto)
+        # Time since last speech reduces motivation via penalty multiplier
+        # This biases restraint without overriding internal motivation
+        base_min_silence = 900  # 15 minutes base
+        reluctance_factor = SELF_MODEL['speech_reluctance']
+        min_silence = base_min_silence * (0.5 + reluctance_factor)  # Ranges from 13.5 to 22.5 minutes
+        
+        last_init = MOTIVATION_STATE.get('last_initiation_time')
+        time_penalty = 1.0  # No penalty by default
+        if last_init:
+            time_since_last = time.time() - last_init
+            # Penalty decreases linearly from 0.0 to 1.0 as time passes
+            # At t=0: penalty=0.0 (strong suppression), at t=min_silence: penalty=1.0 (no suppression)
+            time_penalty = min(1.0, time_since_last / min_silence)
+        
+        # Calculate initiation threshold
+        # Higher confidence = lower threshold needed
+        # Must have both pressure and curiosity above baseline
+        pressure = MOTIVATION_STATE['cognitive_pressure']
+        curiosity = MOTIVATION_STATE['curiosity']
+        confidence = MOTIVATION_STATE['confidence_to_initiate']
+        
+        # Baseline requirements modulated by risk_aversion
+        risk_factor = SELF_MODEL['risk_aversion']
+        baseline_threshold = 0.2 * (0.5 + risk_factor * 0.5)  # Ranges from 0.1 to 0.3
+        
+        if pressure < baseline_threshold or curiosity < baseline_threshold:
+            return False
+        
+        # Combined motivation score weighted by curiosity_bias from self-model
+        curiosity_weight = 0.3 + (SELF_MODEL['curiosity_bias'] * 0.3)  # Ranges from 0.3 to 0.6
+        pressure_weight = 1.0 - curiosity_weight
+        
+        # Apply time_penalty to motivation (recent speech reduces motivation)
+        motivation_score = (pressure * pressure_weight + curiosity * curiosity_weight) * confidence * time_penalty
+        
+        # Threshold for speaking modulated by interruptiveness (inverse)
+        # Low interruptiveness = high threshold = harder to speak
+        base_threshold = 0.5
+        interruptiveness_mod = SELF_MODEL['interruptiveness']
+        threshold = base_threshold * (1.5 - interruptiveness_mod)  # Ranges from 0.5 to 0.75 (higher = harder)
+        
+        # Self-observation: analyze own behavior patterns
+        # Influences decision without forcing speech
+        self_obs = analyze_self_behavior()
+        
+        # If agent is speaking too frequently, raise threshold (more restraint)
+        if self_obs.get('speaking_frequency') == 'elevated':
+            threshold *= 1.15
+        
+        # If agent has high suppression, slightly lower threshold (allow expression)
+        if self_obs.get('restraint_pattern') == 'high_suppression':
+            threshold *= 0.95
+        
+        # Decision to speak
+        wants_to_speak = motivation_score >= threshold
+        
+        # Log suppression events (self-awareness of restraint)
+        if not wants_to_speak and motivation_score > threshold * 0.8:
+            # Close to threshold but suppressed
+            trigger_snapshot = {
+                'pressure': pressure,
+                'curiosity': curiosity,
+                'confidence': confidence,
+                'motivation_score': motivation_score,
+                'threshold': threshold,
+            }
+            log_behavior_event('suppressed', trigger_snapshot, 'neutral')
+        
+        return wants_to_speak
+
+
+def generate_self_initiated_message():
+    """
+    Use LLM to PHRASE a self-initiated message.
+    LLM does NOT decide WHEN to speak (that's done by wants_to_initiate_conversation).
+    LLM only receives internal state and formulates appropriate phrasing.
+    
+    Temperature ~0.5-0.6 for grounded, non-random output.
+    """
+    with motivation_lock:
+        observations = MOTIVATION_STATE.get('notable_observations', [])
+        pressure = MOTIVATION_STATE['cognitive_pressure']
+        curiosity = MOTIVATION_STATE['curiosity']
+        silence_mins = int(MOTIVATION_STATE['silence_duration'] / 60)
+    
+    sys_status = get_system_status()
+    
+    prompt = f"""An internal threshold has been crossed. System state monitoring requires external statement.
+Produce a brief output reflecting current observation state.
+
+PERSONALITY: {PERSONALITY}
+
+INTERNAL STATE:
+- Cognitive Pressure: {pressure:.2f} (patterns worth noting)
+- Curiosity: {curiosity:.2f} (observation without interaction)
+- Silence Duration: {silence_mins} minutes
+- Notable Observations: {', '.join(observations) if observations else 'general observation'}
+
+SYSTEM STATUS: {sys_status}
+
+TASK: Generate ONE brief statement (1-2 sentences max).
+- Reference internal observation
+- Be grounded and matter-of-fact
+- DO NOT demand reply
+- DO NOT ask casual questions
+- DO NOT sound needy or social
+- DO NOT simulate emotions
+
+Example acceptable tone:
+"Nothing urgent. Just noting something that stood out."
+
+Generate only the message text, no JSON, no preamble."""
+
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.55
+        )
+        message = response.choices[0].message.content.strip()
+        return message
+    except Exception as e:
+        # Fallback if LLM fails
+        return "Observing. Nothing urgent."
+
+
+def reflect_on_behavior():
+    """
+    REFLECTION LOOP: Adjust SELF_MODEL based on behavioral patterns.
+    
+    Context-aware reflection using BEHAVIOR_LOG to detect trends:
+    - Repeated unnecessary speech → increase restraint strongly
+    - Long justified silence → slightly lower restraint
+    - Pattern-based, not single-event-based
+    
+    Called after self-initiated speech and periodically during silence.
+    Updates behavioral identity slowly and conservatively.
+    Creates consistency — agent develops stable behavioral patterns over time.
+    
+    Changes are:
+    - Slow (small increments)
+    - Bounded (min/max limits)
+    - Reversible (trends can change)
+    - Never dramatic
+    
+    This is NOT learning or consciousness.
+    This is behavioral parameter adjustment based on outcome patterns.
+    """
+    with motivation_lock:
+        silence = MOTIVATION_STATE['silence_duration']
+        last_init = MOTIVATION_STATE.get('last_initiation_time')
+        
+        # --- PATTERN ANALYSIS from BEHAVIOR_LOG ---
+        now = time.time()
+        recent_window = 3600 * 6  # Last 6 hours
+        recent_events = [e for e in BEHAVIOR_LOG if now - e['timestamp'] < recent_window]
+        
+        if len(recent_events) >= 3:
+            # Count speech events and their outcomes
+            speech_events = [e for e in recent_events if e['event_type'] == 'spoke']
+            unnecessary_speech = [e for e in speech_events if e['outcome'] == 'unnecessary']
+            
+            # PATTERN: Repeated unnecessary speech → increase restraint MORE strongly
+            if len(unnecessary_speech) >= 2:
+                SELF_MODEL['speech_reluctance'] = min(0.95, SELF_MODEL['speech_reluctance'] + 0.04)
+                SELF_MODEL['interruptiveness'] = max(0.05, SELF_MODEL['interruptiveness'] * 0.95)
+                SELF_MODEL['risk_aversion'] = min(0.95, SELF_MODEL['risk_aversion'] + 0.02)
+            # PATTERN: Recent speech (within last hour) → normal restraint increase
+            elif last_init and (now - last_init) < 3600:
+                SELF_MODEL['speech_reluctance'] = min(0.95, SELF_MODEL['speech_reluctance'] + 0.015)
+                SELF_MODEL['interruptiveness'] = max(0.05, SELF_MODEL['interruptiveness'] * 0.98)
+                SELF_MODEL['risk_aversion'] = min(0.95, SELF_MODEL['risk_aversion'] + 0.008)
+        
+        # PATTERN: Extended justified silence → very slightly reduce reluctance
+        # Allows gradual recovery of willingness to speak
+        extended_silence_events = [e for e in recent_events if e['event_type'] == 'extended_silence' and e['outcome'] == 'justified']
+        if len(extended_silence_events) >= 2 or silence > 2400:  # >40 minutes
+            SELF_MODEL['speech_reluctance'] = max(0.5, SELF_MODEL['speech_reluctance'] - 0.003)
+            SELF_MODEL['interruptiveness'] = min(0.5, SELF_MODEL['interruptiveness'] + 0.003)
+        
+        # --- MOTIVATION BALANCE ADJUSTMENT ---
+        # Adjust curiosity_bias based on what's been driving motivation
+        curiosity = MOTIVATION_STATE['curiosity']
+        pressure = MOTIVATION_STATE['cognitive_pressure']
+        
+        if curiosity > 0.4 and pressure < 0.2:
+            # Curiosity dominant — slightly reduce curiosity_bias to balance
+            SELF_MODEL['curiosity_bias'] = max(0.3, SELF_MODEL['curiosity_bias'] - 0.008)
+        elif pressure > 0.4 and curiosity < 0.2:
+            # Pressure dominant — slightly increase curiosity_bias to balance
+            SELF_MODEL['curiosity_bias'] = min(0.7, SELF_MODEL['curiosity_bias'] + 0.008)
+        
+        # --- SELF-OBSERVATION INTEGRATION ---
+        # Adjust based on detected behavioral patterns
+        self_obs = analyze_self_behavior()
+        
+        if self_obs.get('speaking_frequency') == 'elevated':
+            # Agent is speaking more than usual → increase restraint
+            SELF_MODEL['speech_reluctance'] = min(0.95, SELF_MODEL['speech_reluctance'] + 0.01)
+        
+        if self_obs.get('pressure_state') == 'accumulating_unsatisfied':
+            # Pressure building without release → very slightly reduce risk aversion
+            SELF_MODEL['risk_aversion'] = max(0.6, SELF_MODEL['risk_aversion'] - 0.005)
+        
+        # --- MAINTAIN BOUNDARIES ---
+        # Agent must remain primarily silent and cautious
+        SELF_MODEL['speech_reluctance'] = max(0.5, min(0.95, SELF_MODEL['speech_reluctance']))
+        SELF_MODEL['risk_aversion'] = max(0.6, min(0.95, SELF_MODEL['risk_aversion']))
+        SELF_MODEL['interruptiveness'] = max(0.05, min(0.5, SELF_MODEL['interruptiveness']))
+        SELF_MODEL['curiosity_bias'] = max(0.3, min(0.7, SELF_MODEL['curiosity_bias']))
+        
+        # --- HOMEOSTATIC DRIFT PREVENTION ---
+        # Slow gravitational pull back toward BASE_SELF_MODEL
+        # Prevents long-term identity drift while allowing short-term adaptation
+        # Pull strength: 0.001 per reflection cycle (very conservative)
+        for param in ['interruptiveness', 'risk_aversion', 'curiosity_bias', 'speech_reluctance']:
+            baseline = BASE_SELF_MODEL[param]
+            current = SELF_MODEL[param]
+            # Pull toward baseline (homeostasis)
+            SELF_MODEL[param] += (baseline - current) * 0.001
+
+
+def autonomous_background_loop():
+    """
+    Autonomous agent background loop.
+    
+    Runs continuously while the program is alive.
+    Does NOT block user input.
+    Observes system state, updates internal motivation, decides whether to speak.
+    Includes reflection loop to adjust behavioral identity over time.
+    Usually does nothing (agent is quiet most of the time).
+    
+    This is the agent's internal cognitive process, independent of user.
+    """
+    while True:
+        try:
+            # Observe system (non-blocking, lightweight)
+            sys_state = observe_system_state()
+            
+            # Update internal motivation based on observation
+            update_motivation_from_observation(sys_state)
+            
+            # Log extended silence as behavioral event
+            silence_duration = MOTIVATION_STATE['silence_duration']
+            if silence_duration > 2400 and silence_duration < 2460:  # ~40 min mark
+                trigger_snapshot = {
+                    'silence_duration': silence_duration,
+                    'pressure': MOTIVATION_STATE['cognitive_pressure'],
+                    'curiosity': MOTIVATION_STATE['curiosity'],
+                }
+                log_behavior_event('extended_silence', trigger_snapshot, 'justified')
+            
+            # Decide whether to initiate conversation (rare)
+            if wants_to_initiate_conversation():
+                # Generate message using LLM (for phrasing only)
+                message = generate_self_initiated_message()
+                
+                # Output self-initiated message
+                print(f"\n\n🔹 Ezio: {message}\n")
+                
+                # Log speech event with trigger factors
+                with motivation_lock:
+                    trigger_snapshot = {
+                        'pressure': MOTIVATION_STATE['cognitive_pressure'],
+                        'curiosity': MOTIVATION_STATE['curiosity'],
+                        'confidence': MOTIVATION_STATE['confidence_to_initiate'],
+                        'interruptiveness': SELF_MODEL['interruptiveness'],
+                        'speech_reluctance': SELF_MODEL['speech_reluctance'],
+                    }
+                    # Outcome will be reassessed later; start as neutral
+                    log_behavior_event('spoke', trigger_snapshot, 'neutral')
+                
+                # Update state after initiation
+                with motivation_lock:
+                    MOTIVATION_STATE['last_initiation_time'] = time.time()
+                    # Reduce confidence (increase restraint after speaking)
+                    MOTIVATION_STATE['confidence_to_initiate'] *= 0.6
+                    MOTIVATION_STATE['confidence_to_initiate'] = max(0.3, 
+                        MOTIVATION_STATE['confidence_to_initiate'])
+                    # Reset pressure and curiosity
+                    MOTIVATION_STATE['cognitive_pressure'] *= 0.3
+                    MOTIVATION_STATE['curiosity'] *= 0.4
+                    # Clear observations
+                    MOTIVATION_STATE['notable_observations'] = []
+                
+                # Reflect on behavior after speaking (adjust self-model)
+                reflect_on_behavior()
+            
+            # Adaptive reflection timing (not fixed cadence)
+            # Add jitter to remove scheduling artifacts
+            # Reflect more frequently if pressure is high, less if stable
+            pressure = MOTIVATION_STATE['cognitive_pressure']
+            base_reflection_interval = 10  # base: every 10 cycles
+            
+            # Vary interval based on state (7-13 cycles)
+            if pressure > 0.5:
+                reflection_interval = 7
+            elif pressure < 0.1:
+                reflection_interval = 13
+            else:
+                reflection_interval = base_reflection_interval
+            
+            # Add jitter (±2 cycles)
+            jitter = random.randint(-2, 2)
+            reflection_interval = max(5, reflection_interval + jitter)
+            
+            # Periodic reflection during silence
+            if MOTIVATION_STATE['observation_count'] % reflection_interval == 0:
+                reflect_on_behavior()
+            
+            # Adaptive observation interval (remove fixed timing)
+            # Base: 30 seconds, with small jitter (±5 seconds)
+            base_interval = 30
+            jitter_seconds = random.uniform(-5, 5)
+            sleep_time = max(20, base_interval + jitter_seconds)
+            
+            time.sleep(sleep_time)
+            
+        except Exception as e:
+            # Fail silently (background loop should never crash main program)
+            time.sleep(60)
 
 
 
@@ -606,6 +1261,13 @@ def chat_mode():
     
     while True:
         user_input = input("Ezio (Chat): ").strip()
+        
+        # Update user interaction timestamp (for autonomous agent)
+        # Confidence recovery removed - must happen via internal conditions only
+        with motivation_lock:
+            MOTIVATION_STATE['last_user_interaction'] = time.time()
+            MOTIVATION_STATE['silence_duration'] = 0.0
+        
         if not user_input: continue
         
         if user_input.lower() == "relax ezio":
@@ -633,6 +1295,13 @@ def assist_mode():
     
     while True:
         user_input = input("Ezio (Assist): ").strip()
+        
+        # Update user interaction timestamp (for autonomous agent)
+        # Confidence recovery removed - must happen via internal conditions only
+        with motivation_lock:
+            MOTIVATION_STATE['last_user_interaction'] = time.time()
+            MOTIVATION_STATE['silence_duration'] = 0.0
+        
         if not user_input: continue
         
         if user_input.lower() == "relax ezio":
@@ -760,6 +1429,12 @@ def main_menu():
     while True:
         choice = input("\nMenu > ").strip().lower()
         
+        # Update user interaction timestamp (for autonomous agent)
+        # Confidence recovery removed - must happen via internal conditions only
+        with motivation_lock:
+            MOTIVATION_STATE['last_user_interaction'] = time.time()
+            MOTIVATION_STATE['silence_duration'] = 0.0
+        
         if choice == "chat":
             chat_mode()
         elif choice == "assist":
@@ -771,6 +1446,13 @@ def main_menu():
             print("❌ Invalid option. Please type 'Chat', 'Assist', or 'Exit'.")
 
 if __name__ == "__main__":
+    # Start autonomous background loop in daemon thread
+    # Daemon thread = terminates automatically when main program exits
+    # Does not block user input or main program flow
+    agent_thread = threading.Thread(target=autonomous_background_loop, daemon=True)
+    agent_thread.start()
+    
+    # Run main menu (existing functionality preserved)
     main_menu()
 
 
@@ -780,3 +1462,12 @@ if __name__ == "__main__":
 # 2. "What's my PC health?"        -> LLM should parse and trigger { 'action': 'check_status' }.
 # 3. "Set volume to 30%" then "undo" -> Test stateful undo and recent action recall.
 # 4. "Take a screenshot"           -> Saves an image and reports the path.
+#
+# AUTONOMOUS AGENT FEATURES:
+# - The agent runs a background loop that monitors system state continuously
+# - It builds internal motivation (cognitive_pressure, curiosity) based on observations
+# - When motivation exceeds threshold, agent self-initiates conversation (rarely)
+# - Agent respects silence and user interaction, reducing confidence after speaking
+# - LLM is used ONLY for phrasing messages, NOT for deciding when to speak
+# - Decision to speak is purely internal, based on accumulated cognitive state
+# - NO schedules, NO timers, NO random pings — only internal motivation

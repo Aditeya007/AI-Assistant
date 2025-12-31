@@ -1,4 +1,7 @@
 openai>=1.3.0
 python-dotenv
 pyautogui
-winshell
+psutil
+screen-brightness-control
+comtypes
+pycaw

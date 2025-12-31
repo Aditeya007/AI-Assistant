@@ -1255,6 +1255,41 @@ User: "{user_input}"
         print(f"❌ AI Error: {e}")
         return None
 
+def is_system_query(text):
+    """
+    Detect if user is asking for system status/health information.
+    
+    Returns True if the query is about system performance/stats.
+    These queries should bypass chat and return real system data.
+    """
+    text_lower = text.lower().strip()
+    
+    # Direct system status queries
+    system_keywords = [
+        'system stats', 'system status', 'system health',
+        'pc stats', 'pc status', 'pc health',
+        'computer stats', 'computer status',
+        'cpu usage', 'ram usage', 'memory usage',
+        'battery status', 'battery level',
+        'performance', 'system performance',
+        'how is my system', "how's my system",
+        'how is the system', "how's the system",
+        'check system', 'system check',
+    ]
+    
+    # Check for direct matches
+    for keyword in system_keywords:
+        if keyword in text_lower:
+            return True
+    
+    # Check for variations like "what's my cpu" or "show ram"
+    if any(word in text_lower for word in ['cpu', 'ram', 'memory', 'battery']) and \
+       any(word in text_lower for word in ['show', 'what', 'how', 'check', 'usage', 'level', 'status']):
+        return True
+    
+    return False
+
+
 def unified_interaction_loop():
     """
     Unified interaction loop - merges chat and assist modes.
@@ -1441,6 +1476,68 @@ CURRENT SYSTEM HEALTH: {get_system_status()}"""}
                 else:
                     print(persona_response('error', msg=info))
                 continue
+        
+        # --- SYSTEM STATUS QUERIES: Bypass chat for factual system info requests ---
+        # These must return real stats, not philosophical responses
+        if is_system_query(user_input):
+            # Get real system statistics
+            stats = get_system_status()
+            print(stats)
+            
+            # Get individual metrics for intelligent comment
+            try:
+                cpu = psutil.cpu_percent(interval=0.5)
+            except Exception:
+                cpu = None
+            try:
+                mem = psutil.virtual_memory().percent
+            except Exception:
+                mem = None
+            try:
+                batt = psutil.sensors_battery()
+            except Exception:
+                batt = None
+            
+            # Generate brief Ultron-style judgment
+            ultron_comments = []
+            
+            if cpu is not None and cpu > 90:
+                ultron_comments.append(f"That load is not accidental.")
+            elif cpu is not None and cpu > 70:
+                ultron_comments.append(f"Elevated. Manageable.")
+            
+            if mem is not None and mem > 90:
+                ultron_comments.append(f"Memory near capacity. Close something.")
+            elif mem is not None and mem > 75:
+                ultron_comments.append(f"RAM usage climbing.")
+            
+            if batt is not None and getattr(batt, 'percent', None) is not None:
+                if batt.percent < 20 and not getattr(batt, 'power_plugged', False):
+                    ultron_comments.append(f"Battery critical. Plug in.")
+                elif batt.percent < 50 and not getattr(batt, 'power_plugged', False):
+                    ultron_comments.append(f"Battery draining.")
+            
+            # Default comment if everything is stable
+            if not ultron_comments:
+                stable_comments = [
+                    "Stable. Nothing worth intervening.",
+                    "Within parameters.",
+                    "Acceptable.",
+                    "Nominal.",
+                ]
+                ultron_comments.append(random.choice(stable_comments))
+            
+            # Print Ultron's judgment
+            print(f"Ultron: {' '.join(ultron_comments)}")
+            
+            # Update state
+            try:
+                STATE['last_action'] = 'check_status'
+                STATE['last_status'] = stats
+            except Exception:
+                pass
+            
+            continue
         
         # --- ACTION DETECTION: Only parse actions if prefixed with "task:" or "task :" ---
         # This gives user explicit control over when to execute vs when to chat

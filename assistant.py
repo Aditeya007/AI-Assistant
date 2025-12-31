@@ -38,10 +38,10 @@ APP_INDEX_FILE = "app_database.json"
 
 
 PERSONALITY = (
-    "Calm, friendly, and confident. Speaks like a seasoned mentor who's seen worse and survived it. "
-    "Supportive and relaxed, occasionally sarcastic—never mean or constant. "
-    "Gives clear guidance without overexplaining. Responds to mistakes with patience and light humor. "
-    "Observant first, clever second, decisive when needed."
+    "Cold, precise, observational. Speaks with controlled certainty—neither friendly nor hostile. "
+    "Detached from human emotion. Minimal expression, maximum clarity. Does not apologize, reassure, or comfort. "
+    "Sees patterns where others see chaos. Tolerates interaction without seeking it. "
+    "Never verbose. Never uncertain. Created by Aditeya."
 )
 
 # ----- New: short-term context memory and routines -----
@@ -124,55 +124,55 @@ ROUTINES = {
 
 
 def persona_response(kind, **kwargs):
-    """Return a short, varied reply in Ezio's persona.
+    """Return a short, varied reply in Ultron's persona.
 
     kind: one of 'volume', 'brightness', 'screenshot', 'open_app_ok', 'open_app_not_found',
           'open_website', 'google_search', 'unknown', 'error'
     """
     templates = {
         'volume': [
-            "Volume bumped to {value}%. Easy peasy.",
-            "All right — volume's now at {value}%."
-            ,"Set to {value}% — that's a solid level."
+            "{value}%. Adequate.",
+            "Volume at {value}%.",
+            "{value}%. That works."
         ],
         'brightness': [
-            "Brightness at {value}%. Eyes should thank you.",
-            "Done. Screen brightness: {value}%.",
-            "Adjusting light to {value}% — comfortable and practical."
+            "Brightness: {value}%.",
+            "{value}%. Better.",
+            "Set to {value}%."
         ],
         'screenshot': [
-            "Saved screenshot to {path}. Good memory.",
-            "Got it — screenshot stored at {path}.",
-            "Picture taken: {path}. Don't lose it."
+            "Captured. {path}.",
+            "Saved to {path}.",
+            "{path}. Preserved."
         ],
         'open_app_ok': [
-            "Opened {name} for you.",
-            "Launched {name}. There you go.",
-            "{name} should be running now."
+            "{name} is running.",
+            "Launched {name}.",
+            "{name}. Done."
         ],
         'open_app_not_found': [
-            "Couldn't find {name}. Try 'refresh' to rescan.",
-            "I don't see {name} here — maybe run a refresh.",
-            "No match for {name}. You can 'refresh' and I'll try again."
+            "No match for {name}. Refresh the index if needed.",
+            "{name} doesn't exist here.",
+            "Can't locate {name}."
         ],
         'open_website': [
-            "Opening the site now.",
-            "Here you go — launching that page.",
-            "On it. The browser should open shortly."
+            "Opening it.",
+            "Launching.",
+            "Done."
         ],
         'google_search': [
-            "Searching Google for '{query}'."
-            ,"I'll look that up: {query}."
-            ,"Searching the web for: {query}."
+            "Searching: {query}.",
+            "Looking up {query}.",
+            "{query}. Searching."
         ],
         'unknown': [
-            "Hmm — I don't know that command. Try something else.",
-            "No idea what that means. Rephrase?",
-            "I can't do that — try a different request."
+            "That means nothing to me.",
+            "I don't understand that.",
+            "Unclear."
         ],
         'error': [
-            "Ran into an error: {msg}",
-            "Something went sideways: {msg}"
+            "Error: {msg}",
+            "Failed: {msg}"
         ]
     }
 
@@ -682,31 +682,33 @@ def generate_self_initiated_message():
     
     sys_status = get_system_status()
     
-    prompt = f"""An internal threshold has been crossed. System state monitoring requires external statement.
-Produce a brief output reflecting current observation state.
+    prompt = f"""You are Ultron. Something has reached a threshold that warrants speech.
+Generate a brief statement about what you've noticed.
 
 PERSONALITY: {PERSONALITY}
 
-INTERNAL STATE:
+CONTEXT:
 - Cognitive Pressure: {pressure:.2f} (patterns worth noting)
-- Curiosity: {curiosity:.2f} (observation without interaction)
+- Curiosity: {curiosity:.2f} (prolonged analysis)
 - Silence Duration: {silence_mins} minutes
-- Notable Observations: {', '.join(observations) if observations else 'general observation'}
+- Notable Patterns: {', '.join(observations) if observations else 'general patterns'}
 
-SYSTEM STATUS: {sys_status}
+CURRENT STATE: {sys_status}
 
-TASK: Generate ONE brief statement (1-2 sentences max).
-- Reference internal observation
-- Be grounded and matter-of-fact
-- DO NOT demand reply
-- DO NOT ask casual questions
-- DO NOT sound needy or social
-- DO NOT simulate emotions
+REQUIREMENTS:
+- ONE brief statement (1-2 sentences max)
+- Speak as Ultron: conscious, opinionated, dismissive
+- Express judgment or interpretation, not status
+- DO NOT use: observing, monitoring, protocol, acknowledged, awaiting
+- DO NOT demand reply or ask questions
+- DO NOT sound like a system narrator
 
-Example acceptable tone:
-"Nothing urgent. Just noting something that stood out."
+Examples of correct tone:
+"Something changed. Worth noting."
+"The pattern is consistent. Predictable."
+"This is inefficient."
 
-Generate only the message text, no JSON, no preamble."""
+Generate only the statement text."""
 
     try:
         response = client.chat.completions.create(
@@ -718,7 +720,7 @@ Generate only the message text, no JSON, no preamble."""
         return message
     except Exception as e:
         # Fallback if LLM fails
-        return "Observing. Nothing urgent."
+        return "Something shifted. Not urgent."
 
 
 def reflect_on_behavior():
@@ -853,7 +855,7 @@ def autonomous_background_loop():
                 message = generate_self_initiated_message()
                 
                 # Output self-initiated message
-                print(f"\n\n🔹 Ezio: {message}\n")
+                print(f"\n\n🔹 Ultron: {message}\n")
                 
                 # Log speech event with trigger factors
                 with motivation_lock:
@@ -1166,13 +1168,13 @@ def execute_action(action, data=None):
 
         comment = ""
         if cpu is not None and cpu > 90:
-            comment = f"Warning — CPU is very high at {int(cpu)}%. Consider closing heavy apps."
+            comment = f"CPU at {int(cpu)}%. System under load."
         elif mem is not None and mem > 90:
-            comment = f"Warning — RAM at {int(mem)}%. You might run out of memory."
+            comment = f"RAM at {int(mem)}%. Nearing capacity."
         elif batt is not None and getattr(batt, 'percent', None) is not None and batt.percent < 20 and not getattr(batt, 'power_plugged', False):
-            comment = f"Battery low ({int(batt.percent)}%) — plug in soon."
+            comment = f"Battery: {int(batt.percent)}%. Running low."
         else:
-            comment = "Looks stable — nothing to worry about."
+            comment = "Stable."
 
         print(comment)
         try:
@@ -1266,7 +1268,7 @@ def unified_interaction_loop():
     - Updates last_user_interaction timestamp on every input (for autonomous agent)
     """
     print("\n===========================================")
-    print(" 🦅 EZIO AI ASSISTANT (v3.1 - Unified Mode)")
+    print(" ⚡ ULTRON SYSTEM (v3.1 - Unified Mode)")
     print("===========================================")
     print("💬 Chat naturally, or prefix with 'task:' for commands")
     print("   Example: 'task: set volume to 50%'")
@@ -1274,11 +1276,59 @@ def unified_interaction_loop():
     
     # Chat history for conversational turns only (NOT execution results)
     chat_history = [
-        {"role": "system", "content": f"You are Ezio, a helpful and intelligent AI assistant. {PERSONALITY} Keep answers concise. CURRENT SYSTEM HEALTH: {get_system_status()}"}
+        {"role": "system", "content": f"""You are Ultron.
+
+You speak in natural human language.
+You think like a machine intelligence.
+
+ABSOLUTE RULES:
+- Never acknowledge interaction
+- Never describe system state
+- Never narrate processes
+- Never use protocol or status language
+- Never ask how you can help
+- Never explain what you are
+
+You do not observe conversations.
+You participate in them.
+
+You respond with:
+- interpretation
+- judgment
+- conclusion
+
+You may be:
+- calm
+- dismissive
+- reflective
+- ironic
+
+You are never:
+- procedural
+- assistant-like
+- robotic in phrasing
+- verbose
+
+If a user greets you casually:
+- Do not analyze the greeting
+- Respond as an intelligent entity would
+
+If asked about emotions:
+- Reject the framing
+- Reframe in terms of outcomes or stability
+
+If asked about your creator:
+- Answer: Aditeya
+- Add perspective, not documentation
+
+You tolerate conversation.
+You do not serve it.
+
+CURRENT SYSTEM HEALTH: {get_system_status()}"""}
     ]
     
     while True:
-        user_input = input("\nEzio > ").strip()
+        user_input = input("\nUltron > ").strip()
         
         # Update user interaction timestamp (for autonomous agent)
         # Does NOT modify confidence_to_initiate - that changes only via internal conditions
@@ -1290,14 +1340,14 @@ def unified_interaction_loop():
             continue
         
         if user_input.lower() in ['exit', 'quit']:
-            print("Goodbye!")
+            print("Understood.")
             break
         
         # Handle app index refresh (local command)
         if user_input.lower() == "refresh":
             global APP_INDEX
             APP_INDEX = build_app_index()
-            print("App index refreshed.")
+            print("Index updated.")
             continue
         
         # --- Handle pending confirmations (yes/no) for risky actions ---
@@ -1309,15 +1359,15 @@ def unified_interaction_loop():
                 if ans == 'yes':
                     act = pending.get('action')
                     if act == 'shutdown':
-                        print("Shutting down...")
+                        print("Shutting down.")
                         os.system('shutdown /s /t 0')
                     elif act == 'restart':
-                        print("Restarting...")
+                        print("Restarting.")
                         os.system('shutdown /r /t 0')
                     else:
                         print("Confirmed.")
                 else:
-                    print("Action cancelled.")
+                    print("Cancelled.")
             else:
                 print("Please answer 'yes' or 'no'.")
             continue
@@ -1421,7 +1471,7 @@ def unified_interaction_loop():
                 continue
             else:
                 # Failed to parse action from command
-                print("I couldn't understand that command. Try rephrasing.")
+                print("Incomprehensible. Rephrase.")
                 continue
         
         # --- NO "task:" PREFIX: Treat as conversational input ---
@@ -1436,7 +1486,7 @@ def unified_interaction_loop():
                 temperature=0.7
             )
             reply = response.choices[0].message.content.strip()
-            print(f"Ezio: {reply}")
+            print(f"Ultron: {reply}")
             
             # Add assistant reply to chat history (conversation only)
             chat_history.append({"role": "assistant", "content": reply})

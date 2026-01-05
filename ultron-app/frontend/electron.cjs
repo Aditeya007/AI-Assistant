@@ -6,6 +6,12 @@ let mainWindow;
 let pythonProcess;
 
 function createWindow() {
+  // Determine icon path based on environment
+  const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
+  const iconPath = isDev 
+    ? path.join(__dirname, 'public', 'icon.jpg')
+    : path.join(__dirname, 'dist', 'icon.jpg');
+
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -16,13 +22,12 @@ function createWindow() {
     },
     frame: true,
     title: 'Ultron AI v5.7',
-    icon: path.join(__dirname, 'public', 'icon.png') // Optional: Add icon
+    icon: iconPath
   });
 
   // Load the React app
   // In development: http://localhost:3000
   // In production: file://path/to/dist/index.html
-  const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
   
   if (isDev) {
     mainWindow.loadURL('http://localhost:3000');
@@ -37,13 +42,26 @@ function createWindow() {
 }
 
 function startPythonBackend() {
-  const backendPath = path.join(__dirname, '..', 'backend', 'server.py');
-  const pythonExecutable = 'python'; // Or 'python3' on some systems
+  let backendCommand;
+  let backendArgs = [];
+  let backendCwd;
   
-  console.log('Starting Python backend:', backendPath);
+  if (app.isPackaged) {
+    // Production: Use compiled executable
+    backendCommand = path.join(process.resourcesPath, 'backend', 'ultron_engine.exe');
+    backendCwd = path.join(process.resourcesPath, 'backend');
+    console.log('Starting Python backend (Packaged):', backendCommand);
+  } else {
+    // Development: Use Python script
+    backendCommand = 'python';
+    backendArgs = [path.join(__dirname, '..', 'backend', 'server.py')];
+    backendCwd = path.join(__dirname, '..', 'backend');
+    console.log('Starting Python backend (Development):', backendArgs[0]);
+  }
   
-  pythonProcess = spawn(pythonExecutable, [backendPath], {
-    cwd: path.join(__dirname, '..', 'backend')
+  pythonProcess = spawn(backendCommand, backendArgs, {
+    cwd: backendCwd,
+    stdio: 'pipe'
   });
 
   pythonProcess.stdout.on('data', (data) => {

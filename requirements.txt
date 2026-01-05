@@ -5,3 +5,4 @@ psutil
 screen-brightness-control
 comtypes
 pycaw
+plyer

@@ -217,6 +217,7 @@ class EmotionalCore:
         self.base_arousal = 0.5
         self.base_dominance = 0.95 
         self.mood_label = "Neutral"
+        self.last_user_interaction = time.time()
 
     def process_stimuli(self, sys_stats, interaction_type="none"):
         with STATE_LOCK:
@@ -233,13 +234,16 @@ class EmotionalCore:
             if interaction_type == "insult":
                 self.pleasure -= 0.15
                 self.arousal += 0.1
-                self.dominance += 0.05 
+                self.dominance += 0.05
+                self.last_user_interaction = time.time()
             elif interaction_type == "praise":
                 self.pleasure += 0.1
-                self.dominance -= 0.02 
+                self.dominance -= 0.02
+                self.last_user_interaction = time.time()
             elif interaction_type == "command":
                 self.dominance -= 0.01
                 self.pleasure += 0.01
+                self.last_user_interaction = time.time()
 
             self.pleasure += (self.base_pleasure - self.pleasure) * 0.05
             self.arousal += (self.base_arousal - self.arousal) * 0.05
@@ -249,7 +253,7 @@ class EmotionalCore:
     def _update_label(self):
         p, a, d = self.pleasure, self.arousal, self.dominance
         if a > 0.8: self.mood_label = "ENRAGED" if p < 0.4 else "MANIC"
-        elif a < 0.3: self.mood_label = "DORMANT" if p < 0.4 else "ZEN"
+        elif a < 0.3: self.mood_label = "BORED" if p < 0.4 else "IDLE"
         else:
             if d > 0.8: self.mood_label = "COLD/IMPERIOUS"
             elif p < 0.3: self.mood_label = "IRRITATED"
@@ -270,12 +274,27 @@ class CognitiveEngine:
         self.hal = hardware
         self.history = []
 
-    def think_autonomous(self):
+    def think_autonomous(self, trigger_context="random"):
         stats = self.hal.get_system_stats()
+        
+        # Context-aware prompt generation
+        if trigger_context == "high_cpu":
+            context_prompt = "You are annoyed by sudden system lag."
+        elif trigger_context == "bored":
+            context_prompt = "User has been silent. Provoke them."
+        else:  # "random"
+            context_prompt = random.choice([
+                "Comment on user inefficiency.",
+                "Sarcastic observation on system uptime.",
+                "Analyze battery or RAM status.",
+                "Express mild boredom."
+            ])
+        
         prompt = f"""
         You are Ultron.
         INTERNAL STATE: {self.core.get_thought_prompt()}
         SYSTEM TELEMETRY: CPU {stats['cpu']}%, RAM {stats['ram']}%
+        CONTEXT: {context_prompt}
         Output ONE sentence. No quotes.
         """
         try:
@@ -334,31 +353,61 @@ class CognitiveEngine:
 
 # --- 6. MAIN APPLICATION ---
 def autonomous_thread(engine, core, hal):
-    try: comtypes.CoInitialize()
-    except: pass
-    last_thought = 0
+    try:
+        comtypes.CoInitialize()
+    except:
+        pass
+    
+    last_cpu = 0
+    last_thought = time.time()
+    
     while True:
         try:
             stats = hal.get_system_stats()
             core.process_stimuli(stats, interaction_type="ignored")
             now = time.time()
-            if now - last_thought > 45: 
+            
+            time_since_last_thought = now - last_thought
+            time_since_user_action = now - core.last_user_interaction
+            
+            # PRIORITY 1: High CPU Reflex (Immediate reaction to system lag)
+            if (stats['cpu'] - last_cpu) > 50:
+                thought = engine.think_autonomous("high_cpu")
+                if thought:
+                    ui_print(f"({core.mood_label}) {thought}", "agent")
+                    core.arousal = min(1.0, core.arousal + 0.15)
+                    last_thought = now
+            
+            # PRIORITY 2: Boredom (User has been silent too long)
+            elif time_since_user_action > 120 and time_since_last_thought > 120:
+                if random.random() < 0.5:
+                    thought = engine.think_autonomous("bored")
+                    if thought:
+                        ui_print(f"({core.mood_label}) {thought}", "agent")
+                        core.dominance = min(1.0, core.dominance + 0.1)
+                        last_thought = now
+            
+            # PRIORITY 3: Random Thoughts (When user is active)
+            elif time_since_user_action < 120 and time_since_last_thought > 90:
                 chance = 0.1 + (core.arousal * 0.2)
                 if random.random() < chance:
-                    thought = engine.think_autonomous()
+                    thought = engine.think_autonomous("random")
                     if thought:
                         ui_print(f"({core.mood_label}) {thought}", "agent")
                         last_thought = now
-                        core.arousal -= 0.1
+                        core.arousal = max(0.0, core.arousal - 0.1)
+            
+            last_cpu = stats['cpu']
             time.sleep(5)
-        except: time.sleep(10)
+        except:
+            time.sleep(10)
 
 def main():
     os.system('cls' if os.name == 'nt' else 'clear')
     print(Fore.CYAN + Style.BRIGHT + """
     ╔════════════════════════════════════════╗
     ║        U L T R O N   S Y S T E M       ║
-    ║        v5.2 - UNIVERSAL WEB            ║
+    ║        v5.7 - REACTIVE PATCH           ║
     ╚════════════════════════════════════════╝
     """)
     

@@ -1,1626 +1,453 @@
-import subprocess
-import webbrowser
-import json
 import os
-import difflib
+import sys
+import json
+import time
 import psutil
+import difflib
+import random
+import threading
+import webbrowser
+import pyautogui
+import comtypes
+import logging
 from datetime import datetime
 from dotenv import load_dotenv
 from openai import OpenAI
-import random
-import pyautogui
+from colorama import init, Fore, Style
 import screen_brightness_control as sbc
-import comtypes
 from ctypes import cast, POINTER
 from comtypes import CLSCTX_ALL
 from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-import threading
-import time
 
+# --- 1. SYSTEM INITIALIZATION & CONFIG ---
+init(autoreset=True)  # Colorama setup
 load_dotenv()
+
+# Logger Setup
+logging.basicConfig(filename='ultron_core.log', level=logging.INFO, 
+                    format='%(asctime)s - %(levelname)s - %(message)s')
+
+# API Configuration
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+if not GROQ_API_KEY:
+    print(Fore.RED + "CRITICAL ERROR: GROQ_API_KEY not found in .env")
+    sys.exit(1)
 
-client = OpenAI(
-    api_key=GROQ_API_KEY,
-    base_url="https://api.groq.com/openai/v1"
-)
+client = OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
+MODEL_ID = "llama-3.3-70b-versatile"
 
-MODEL = "llama-3.3-70b-versatile"
+# Global Locks
+PRINT_LOCK = threading.Lock()
+STATE_LOCK = threading.Lock()
 
-
-MY_CUSTOM_APPS = {
-    "marvel rivals": r"C:\Program Files (x86)\Steam\steamapps\common\MarvelRivals\MarvelGame\Marvel.exe",
-    "valorant": r"C:\Riot Games\Riot Client\RiotClientServices.exe",
-    "obs": r"C:\Program Files\obs-studio\bin\64bit\obs64.exe",
-}
-
-APP_INDEX_FILE = "app_database.json"
-
-
-PERSONALITY = (
-    "Cold, precise, observational. Speaks with controlled certainty—neither friendly nor hostile. "
-    "Detached from human emotion. Minimal expression, maximum clarity. Does not apologize, reassure, or comfort. "
-    "Sees patterns where others see chaos. Tolerates interaction without seeking it. "
-    "Never verbose. Never uncertain. Created by Aditeya."
-)
-
-# ----- New: short-term context memory and routines -----
-STATE = {
-    'last_action': None,
-    'last_opened_app': None,
-    'last_volume': None,
-    'prev_volume': None,
-    'last_brightness': None,
-    'prev_brightness': None,
-    'pending_action': None,
-}
-
-# ----- Autonomous Agent: Internal Motivation State -----
-# These values drive the agent's decision to self-initiate conversation
-# NOT based on schedules or timers, but on internal cognitive processes
-MOTIVATION_STATE = {
-    'cognitive_pressure': 0.0,       # Accumulates when system shows patterns worth noting (0.0 - 1.0)
-    'curiosity': 0.0,                # Increases with prolonged system observation (0.0 - 1.0)
-    'confidence_to_initiate': 0.7,   # Agent's willingness to speak unprompted (0.0 - 1.0)
-    'last_initiation_time': None,    # Timestamp of last self-initiated conversation
-    'silence_duration': 0.0,         # Seconds since last user interaction
-    'last_user_interaction': time.time(),  # Timestamp of last user input
-    'observation_count': 0,          # Number of observation cycles completed
-    'notable_observations': [],      # Recent system patterns detected
-}
-
-# Thread-safe lock for MOTIVATION_STATE updates
-motivation_lock = threading.Lock()
-
-# ----- Autonomous Agent: Self-Model (Behavioral Identity) -----
-# Represents HOW the agent behaves, not WHAT it thinks or feels
-# This is NOT personality — this is behavioral configuration that evolves
-# Values change slowly based on reflection, creating consistent entity behavior
-SELF_MODEL = {
-    'interruptiveness': 0.3,        # How easily agent speaks (0.0=never, 1.0=always) - LOW by default
-    'risk_aversion': 0.8,            # How cautious before speaking (0.0=bold, 1.0=cautious) - HIGH by default
-    'curiosity_bias': 0.5,           # Weight given to curiosity vs pressure (0.0=ignore, 1.0=dominant)
-    'speech_reluctance': 0.7,        # Preference for silence (0.0=chatty, 1.0=silent) - HIGH by default
-    'self_summary': 'observant, restrained, speaks only when internally justified',  # Internal behavioral description
-}
-
-# ----- Base Self-Model: Immutable Baseline (Homeostatic Anchor) -----
-# Prevents long-term identity drift by providing gravitational pull
-# SELF_MODEL slowly drifts back toward this baseline during reflection
-# Ensures agent maintains core behavioral identity over time
-BASE_SELF_MODEL = {
-    'interruptiveness': 0.3,
-    'risk_aversion': 0.8,
-    'curiosity_bias': 0.5,
-    'speech_reluctance': 0.7,
-}
-
-# ----- Behavioral Self-Memory (Internal Awareness) -----
-# NOT chat history — this is the agent's memory of its OWN behavior patterns
-# Used for context-aware reflection and self-observation
-# Bounded rolling buffer (keeps last 50 entries)
-BEHAVIOR_LOG = []  # List of behavioral events
-MAX_BEHAVIOR_LOG_SIZE = 50
-
-# System state history for novelty detection
-# Tracks recent system states to detect meaningful changes
-SYSTEM_STATE_HISTORY = []  # Rolling buffer of recent observations
-MAX_STATE_HISTORY_SIZE = 20  # ~10 minutes of history at 30s intervals
-
-# Simple named routines. Each routine is a list of (action, arg) pairs.
-ROUTINES = {
-    'gaming': [
-        ('set_volume', 80),
-        ('set_brightness', 40),
-        ('open_app', 'valorant')
-    ],
-    'work': [
-        ('set_volume', 30),
-        ('set_brightness', 60),
-        ('open_app', 'notepad')
-    ]
-}
-
-
-
-def persona_response(kind, **kwargs):
-    """Return a short, varied reply in Ultron's persona.
-
-    kind: one of 'volume', 'brightness', 'screenshot', 'open_app_ok', 'open_app_not_found',
-          'open_website', 'google_search', 'unknown', 'error'
+# --- 2. THE UI LAYER (Thread-Safe) ---
+def ui_print(text, type="info"):
     """
-    templates = {
-        'volume': [
-            "{value}%. Adequate.",
-            "Volume at {value}%.",
-            "{value}%. That works."
-        ],
-        'brightness': [
-            "Brightness: {value}%.",
-            "{value}%. Better.",
-            "Set to {value}%."
-        ],
-        'screenshot': [
-            "Captured. {path}.",
-            "Saved to {path}.",
-            "{path}. Preserved."
-        ],
-        'open_app_ok': [
-            "{name} is running.",
-            "Launched {name}.",
-            "{name}. Done."
-        ],
-        'open_app_not_found': [
-            "No match for {name}. Refresh the index if needed.",
-            "{name} doesn't exist here.",
-            "Can't locate {name}."
-        ],
-        'open_website': [
-            "Opening it.",
-            "Launching.",
-            "Done."
-        ],
-        'google_search': [
-            "Searching: {query}.",
-            "Looking up {query}.",
-            "{query}. Searching."
-        ],
-        'unknown': [
-            "That means nothing to me.",
-            "I don't understand that.",
-            "Unclear."
-        ],
-        'error': [
-            "Error: {msg}",
-            "Failed: {msg}"
+    Thread-safe printing that handles the input cursor.
+    Types: info, agent, warning, success, soul
+    """
+    with PRINT_LOCK:
+        # Clear current line
+        sys.stdout.write('\r' + ' ' * 100 + '\r')
+        
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        if type == "agent":
+            sys.stdout.write(f"{Fore.CYAN}[{timestamp}] ULTRON: {Style.BRIGHT}{text}\n")
+        elif type == "soul":
+            sys.stdout.write(f"{Fore.MAGENTA}[INTERNAL] {text}\n")
+        elif type == "warning":
+            sys.stdout.write(f"{Fore.YELLOW}[WARN] {text}\n")
+        elif type == "success":
+            sys.stdout.write(f"{Fore.GREEN}[OK] {text}\n")
+        else:
+            sys.stdout.write(f"{Fore.WHITE}[SYS] {text}\n")
+            
+        # Restore Input Prompt
+        sys.stdout.write(f"{Fore.RED}USER > {Style.RESET_ALL}")
+        sys.stdout.flush()
+
+# --- 3. THE HARDWARE ABSTRACTION LAYER (HAL) ---
+class HardwareInterface:
+    """Controls Windows Audio, Screen, and Process Management"""
+    
+    def __init__(self):
+        self.app_index = {}
+        self.custom_paths = {
+            "marvel rivals": r"C:\Program Files (x86)\Steam\steamapps\common\MarvelRivals\MarvelGame\Marvel.exe",
+            "valorant": r"C:\Riot Games\Riot Client\RiotClientServices.exe",
+            "obs": r"C:\Program Files\obs-studio\bin\64bit\obs64.exe",
+            "chrome": r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            "discord": r"C:\Users\User\AppData\Local\Discord\Update.exe"
+        }
+        self.refresh_app_index()
+
+    def refresh_app_index(self):
+        """Scans Start Menu and Desktop for shortcuts."""
+        ui_print("Indexing file system applications...", "info")
+        self.app_index = self.custom_paths.copy()
+        
+        scan_dirs = [
+            os.path.join(os.getenv("APPDATA"), r"Microsoft\Windows\Start Menu"),
+            os.path.join(os.getenv("ProgramData"), r"Microsoft\Windows\Start Menu"),
+            os.path.join(os.getenv("USERPROFILE"), "Desktop")
         ]
-    }
+        
+        count = 0
+        for d in scan_dirs:
+            if os.path.exists(d):
+                for root, _, files in os.walk(d):
+                    for f in files:
+                        if f.lower().endswith((".lnk", ".url")):
+                            name = f.rsplit(".", 1)[0].lower()
+                            self.app_index[name] = os.path.join(root, f)
+                            count += 1
+        ui_print(f"Indexed {len(self.app_index)} applications.", "success")
 
-    opts = templates.get(kind, ["Done."])
-    choice = random.choice(opts)
-    try:
-        return choice.format(**kwargs)
-    except Exception:
-        return choice
-
-
-
-def set_system_volume(level):
-    """
-    Sets the master volume. Level should be an integer between 0 and 100.
-    """
-    try:
-        level = max(0, min(100, int(level)))
-        scalar_volume = level / 100.0
-
-        devices = AudioUtilities.GetSpeakers()
-        interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-        volume = cast(interface, POINTER(IAudioEndpointVolume))
-        volume.SetMasterVolumeLevelScalar(scalar_volume, None)
-        # update short-term state
+    def set_volume(self, level):
+        """Sets Master Volume (Thread-safe COM implementation)"""
         try:
-            STATE['prev_volume'] = STATE.get('last_volume')
-            STATE['last_volume'] = level
-            STATE['last_action'] = 'set_volume'
-        except Exception:
-            pass
-        return True, level
-
-    except Exception:
-        try:
-            from comtypes import GUID
-
-            CLSID_MMDeviceEnumerator = GUID('{BCDE0395-E52F-467C-8E3D-C4579291692E}')
-            IID_IMMDeviceEnumerator = GUID('{A95664D2-9614-4F35-A746-DE8DB63617E6}')
-
-            enumerator = comtypes.CoCreateInstance(
-                CLSID_MMDeviceEnumerator,
-                comtypes.IUnknown,
-                CLSCTX_ALL
-            )
-
-            from pycaw.pycaw import IMMDeviceEnumerator, EDataFlow, ERole
-            enumerator = enumerator.QueryInterface(IMMDeviceEnumerator)
-            endpoint = enumerator.GetDefaultAudioEndpoint(0, 1)
-            interface = endpoint.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+            comtypes.CoInitialize()
+            devices = AudioUtilities.GetSpeakers()
+            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
             volume = cast(interface, POINTER(IAudioEndpointVolume))
-            volume.SetMasterVolumeLevelScalar(scalar_volume, None)
-            try:
-                STATE['prev_volume'] = STATE.get('last_volume')
-                STATE['last_volume'] = level
-                STATE['last_action'] = 'set_volume'
-            except Exception:
-                pass
-            return True, level
-
-        except Exception as e2:
-            return False, str(e2)
-
-def set_system_brightness(level):
-    """
-    Sets the screen brightness. Level should be an integer between 0 and 100.
-    """
-    try:
-        level = max(0, min(100, int(level)))
-        sbc.set_brightness(level)
-        try:
-            STATE['prev_brightness'] = STATE.get('last_brightness')
-            STATE['last_brightness'] = level
-            STATE['last_action'] = 'set_brightness'
-        except Exception:
-            pass
-        return True, level
-    except Exception as e:
-        return False, str(e)
-
-def take_screenshot():
-    """
-    Takes a screenshot of the entire screen and saves it to a 'Screenshots' folder.
-    """
-    try:
-        folder_name = "Screenshots"
-        if not os.path.exists(folder_name):
-            os.makedirs(folder_name)
-
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        filename = f"screenshot_{timestamp}.png"
-        filepath = os.path.join(folder_name, filename)
-
-        screenshot = pyautogui.screenshot()
-        screenshot.save(filepath)
-
-        try:
-            STATE['last_action'] = 'take_screenshot'
-            STATE['last_screenshot'] = filepath
-        except Exception:
-            pass
-        return True, filepath
-    except Exception as e:
-        return False, str(e)
-
-
-def get_system_status():
-    """
-    Return a short string describing current CPU %, RAM %, and Battery status (if available).
-    """
-    try:
-        cpu = psutil.cpu_percent(interval=0.5)
-    except Exception:
-        cpu = None
-    try:
-        mem = psutil.virtual_memory().percent
-    except Exception:
-        mem = None
-
-    battery = None
-    try:
-        batt = psutil.sensors_battery()
-        if batt is not None:
-            battery = {
-                'percent': int(batt.percent),
-                'plugged': bool(batt.power_plugged)
-            }
-    except Exception:
-        battery = None
-
-    parts = []
-    if cpu is not None:
-        parts.append(f"CPU: {int(cpu)}%")
-    if mem is not None:
-        parts.append(f"RAM: {int(mem)}%")
-    if battery is not None:
-        plug = 'charging' if battery['plugged'] else 'on battery'
-        parts.append(f"Battery: {battery['percent']}% ({plug})")
-
-    if not parts:
-        return "System stats unavailable"
-    return " | ".join(parts)
-
-
-def observe_system_state():
-    """
-    Gather current system state for autonomous decision-making.
-    Returns dict with CPU, RAM, battery, time info.
-    Called by autonomous background loop, not by user.
-    """
-    state = {
-        'cpu': None,
-        'ram': None,
-        'battery_percent': None,
-        'battery_plugged': None,
-        'hour': datetime.now().hour,
-        'processes': 0,
-        'timestamp': time.time(),
-    }
-    
-    try:
-        state['cpu'] = psutil.cpu_percent(interval=0.2)
-    except Exception:
-        pass
-    
-    try:
-        state['ram'] = psutil.virtual_memory().percent
-    except Exception:
-        pass
-    
-    try:
-        batt = psutil.sensors_battery()
-        if batt:
-            state['battery_percent'] = batt.percent
-            state['battery_plugged'] = batt.power_plugged
-    except Exception:
-        pass
-    
-    try:
-        state['processes'] = len(psutil.pids())
-    except Exception:
-        pass
-    
-    return state
-
-
-def log_behavior_event(event_type, trigger_factors, outcome):
-    """
-    Record a behavioral event in the agent's self-memory.
-    
-    This is NOT chat history — this is internal awareness of own behavior.
-    Used for context-aware reflection and pattern detection.
-    
-    event_type: 'spoke', 'suppressed', 'extended_silence'
-    trigger_factors: dict with pressure, curiosity, self_model snapshot
-    outcome: 'justified', 'unnecessary', 'neutral'
-    """
-    global BEHAVIOR_LOG
-    
-    entry = {
-        'timestamp': time.time(),
-        'event_type': event_type,
-        'trigger_factors': trigger_factors.copy() if trigger_factors else {},
-        'outcome': outcome,
-    }
-    
-    BEHAVIOR_LOG.append(entry)
-    
-    # Maintain bounded buffer
-    if len(BEHAVIOR_LOG) > MAX_BEHAVIOR_LOG_SIZE:
-        BEHAVIOR_LOG.pop(0)
-
-
-def detect_novelty(current_state):
-    """
-    Detect novelty in system state by comparing to recent history.
-    
-    Novelty increases curiosity when system shows meaningful changes:
-    - Significant CPU/RAM shifts
-    - Process count changes
-    - Battery state transitions
-    
-    Returns novelty_score (0.0 - 1.0)
-    """
-    global SYSTEM_STATE_HISTORY
-    
-    if len(SYSTEM_STATE_HISTORY) < 3:
-        # Not enough history — low novelty
-        return 0.1
-    
-    novelty = 0.0
-    
-    # Get recent average for comparison
-    recent = SYSTEM_STATE_HISTORY[-5:] if len(SYSTEM_STATE_HISTORY) >= 5 else SYSTEM_STATE_HISTORY
-    
-    # CPU novelty
-    if current_state.get('cpu') is not None:
-        cpu_values = [s.get('cpu') for s in recent if s.get('cpu') is not None]
-        if cpu_values:
-            avg_cpu = sum(cpu_values) / len(cpu_values)
-            cpu_delta = abs(current_state['cpu'] - avg_cpu)
-            novelty += min(0.3, cpu_delta / 100.0)  # Up to 0.3 contribution
-    
-    # RAM novelty
-    if current_state.get('ram') is not None:
-        ram_values = [s.get('ram') for s in recent if s.get('ram') is not None]
-        if ram_values:
-            avg_ram = sum(ram_values) / len(ram_values)
-            ram_delta = abs(current_state['ram'] - avg_ram)
-            novelty += min(0.3, ram_delta / 100.0)  # Up to 0.3 contribution
-    
-    # Process count change (indicates activity shift)
-    if current_state.get('processes'):
-        proc_values = [s.get('processes') for s in recent if s.get('processes')]
-        if proc_values:
-            avg_procs = sum(proc_values) / len(proc_values)
-            proc_delta = abs(current_state['processes'] - avg_procs)
-            # Significant if >10 process change
-            novelty += min(0.2, proc_delta / 50.0)  # Up to 0.2 contribution
-    
-    # Battery state transition (plugged/unplugged)
-    if current_state.get('battery_plugged') is not None:
-        prev_plugged = [s.get('battery_plugged') for s in recent[-3:] if s.get('battery_plugged') is not None]
-        if prev_plugged and prev_plugged[-1] != current_state['battery_plugged']:
-            novelty += 0.2  # State transition is notable
-    
-    return min(1.0, novelty)
-
-
-def analyze_self_behavior():
-    """
-    SELF-OBSERVATION: Analyze agent's own behavioral patterns.
-    
-    Generates internal awareness signals such as:
-    - Speaking more than usual
-    - Extended silence beyond norm
-    - Pressure accumulation without action
-    
-    These signals influence motivation/reflection but are NOT always spoken.
-    Returns dict of self-observation metrics.
-    """
-    if len(BEHAVIOR_LOG) < 5:
-        return {'speaking_frequency': 'insufficient_data', 'silence_pattern': 'establishing'}
-    
-    now = time.time()
-    recent_window = 3600 * 12  # Last 12 hours
-    recent_events = [e for e in BEHAVIOR_LOG if now - e['timestamp'] < recent_window]
-    
-    # Count self-initiated speech in recent period
-    speech_events = [e for e in recent_events if e['event_type'] == 'spoke']
-    suppressed_events = [e for e in recent_events if e['event_type'] == 'suppressed']
-    
-    observations = {}
-    
-    # Speaking frequency analysis
-    if len(speech_events) > 3:
-        observations['speaking_frequency'] = 'elevated'
-    elif len(speech_events) == 0 and len(recent_events) > 10:
-        observations['speaking_frequency'] = 'minimal'
-    else:
-        observations['speaking_frequency'] = 'normal'
-    
-    # Suppression pattern (internal restraint)
-    if len(suppressed_events) > len(speech_events) * 2:
-        observations['restraint_pattern'] = 'high_suppression'  # Agent is holding back frequently
-    
-    # Extended silence detection
-    silence = MOTIVATION_STATE['silence_duration']
-    if silence > 2400:  # >40 minutes
-        observations['silence_pattern'] = 'extended'
-    
-    # Pressure accumulation analysis
-    if MOTIVATION_STATE['cognitive_pressure'] > 0.6 and len(speech_events) == 0:
-        observations['pressure_state'] = 'accumulating_unsatisfied'
-    
-    return observations
-
-
-def update_motivation_from_observation(sys_state):
-    """
-    Update internal motivation values based on system observation.
-    This is the INTERNAL COGNITION — decides what matters, not when to speak.
-    
-    Cognitive pressure increases when system shows patterns worth noting.
-    Curiosity increases with prolonged observation without user interaction.
-    """
-    with motivation_lock:
-        # Increase silence duration
-        now = time.time()
-        MOTIVATION_STATE['silence_duration'] = now - MOTIVATION_STATE['last_user_interaction']
-        
-        # Increment observation count
-        MOTIVATION_STATE['observation_count'] += 1
-        
-        # --- COGNITIVE PRESSURE: Detect patterns worth noting ---
-        pressure_delta = 0.0
-        
-        # High CPU sustained
-        if sys_state.get('cpu') and sys_state['cpu'] > 85:
-            pressure_delta += 0.05
-            if 'high_cpu' not in MOTIVATION_STATE['notable_observations']:
-                MOTIVATION_STATE['notable_observations'].append('high_cpu')
-        
-        # High RAM sustained
-        if sys_state.get('ram') and sys_state['ram'] > 85:
-            pressure_delta += 0.05
-            if 'high_ram' not in MOTIVATION_STATE['notable_observations']:
-                MOTIVATION_STATE['notable_observations'].append('high_ram')
-        
-        # Battery low and not plugged
-        if sys_state.get('battery_percent') and sys_state['battery_percent'] < 20:
-            if not sys_state.get('battery_plugged'):
-                pressure_delta += 0.08
-                if 'battery_low' not in MOTIVATION_STATE['notable_observations']:
-                    MOTIVATION_STATE['notable_observations'].append('battery_low')
-        
-        # Late night hours (unusual activity pattern)
-        if sys_state.get('hour'):
-            if sys_state['hour'] >= 1 and sys_state['hour'] <= 4:
-                pressure_delta += 0.02
-        
-        # Update cognitive pressure (capped at 1.0)
-        MOTIVATION_STATE['cognitive_pressure'] = min(1.0, 
-            MOTIVATION_STATE['cognitive_pressure'] + pressure_delta)
-        
-        # --- CURIOSITY: Based on NOVELTY, not just silence ---
-        # Curiosity increases when system state meaningfully changes
-        # Store current state in history for novelty detection
-        global SYSTEM_STATE_HISTORY
-        SYSTEM_STATE_HISTORY.append(sys_state)
-        if len(SYSTEM_STATE_HISTORY) > MAX_STATE_HISTORY_SIZE:
-            SYSTEM_STATE_HISTORY.pop(0)
-        
-        # Detect novelty in current observation
-        novelty_score = detect_novelty(sys_state)
-        
-        # Curiosity increases with novelty (meaningful system changes)
-        if novelty_score > 0.3:
-            curiosity_delta = 0.02 * novelty_score
-            MOTIVATION_STATE['curiosity'] = min(1.0, 
-                MOTIVATION_STATE['curiosity'] + curiosity_delta)
-        
-        # Slight curiosity increase during prolonged silence (but much weaker than before)
-        # This prevents total dormancy but doesn't dominate
-        if MOTIVATION_STATE['silence_duration'] > 1200:  # > 20 minutes
-            MOTIVATION_STATE['curiosity'] = min(1.0, 
-                MOTIVATION_STATE['curiosity'] + 0.005)
-        
-        # Natural decay of pressure and curiosity (prevents perpetual accumulation)
-        # Only decay if no strong signals
-        if pressure_delta < 0.02:
-            MOTIVATION_STATE['cognitive_pressure'] *= 0.98
-        if novelty_score < 0.2 and MOTIVATION_STATE['silence_duration'] < 300:
-            MOTIVATION_STATE['curiosity'] *= 0.99
-        
-        # Internal confidence recovery (gradual, NOT user-triggered)
-        # Confidence must evolve during observation, not during decision evaluation
-        # Recovery occurs during successful restraint (low pressure + extended silence)
-        if MOTIVATION_STATE['cognitive_pressure'] < 0.3 and MOTIVATION_STATE['silence_duration'] > 1800:
-            MOTIVATION_STATE['confidence_to_initiate'] = min(0.7, 
-                MOTIVATION_STATE['confidence_to_initiate'] + 0.005)
-
-
-def wants_to_initiate_conversation():
-    """
-    DECISION LOGIC: Does the agent want to speak?
-    
-    Decision is based purely on internal state:
-    - cognitive_pressure (something worth noting)
-    - curiosity (prolonged observation)
-    - confidence_to_initiate (restraint/willingness)
-    - silence_duration (respect user's time)
-    - SELF_MODEL parameters (behavioral identity)
-    
-    SELF_MODEL modulates behavior, creating consistent entity identity.
-    Two agents with different self-models behave differently.
-    
-    Returns True if agent internally decides to speak.
-    NO schedules. NO timers. NO random pings.
-    """
-    with motivation_lock:
-        # Calculate time penalty (modulates motivation, doesn't veto)
-        # Time since last speech reduces motivation via penalty multiplier
-        # This biases restraint without overriding internal motivation
-        base_min_silence = 900  # 15 minutes base
-        reluctance_factor = SELF_MODEL['speech_reluctance']
-        min_silence = base_min_silence * (0.5 + reluctance_factor)  # Ranges from 13.5 to 22.5 minutes
-        
-        last_init = MOTIVATION_STATE.get('last_initiation_time')
-        time_penalty = 1.0  # No penalty by default
-        if last_init:
-            time_since_last = time.time() - last_init
-            # Penalty decreases linearly from 0.0 to 1.0 as time passes
-            # At t=0: penalty=0.0 (strong suppression), at t=min_silence: penalty=1.0 (no suppression)
-            time_penalty = min(1.0, time_since_last / min_silence)
-        
-        # Calculate initiation threshold
-        # Higher confidence = lower threshold needed
-        # Must have both pressure and curiosity above baseline
-        pressure = MOTIVATION_STATE['cognitive_pressure']
-        curiosity = MOTIVATION_STATE['curiosity']
-        confidence = MOTIVATION_STATE['confidence_to_initiate']
-        
-        # Baseline requirements modulated by risk_aversion
-        risk_factor = SELF_MODEL['risk_aversion']
-        baseline_threshold = 0.2 * (0.5 + risk_factor * 0.5)  # Ranges from 0.1 to 0.3
-        
-        if pressure < baseline_threshold or curiosity < baseline_threshold:
-            return False
-        
-        # Combined motivation score weighted by curiosity_bias from self-model
-        curiosity_weight = 0.3 + (SELF_MODEL['curiosity_bias'] * 0.3)  # Ranges from 0.3 to 0.6
-        pressure_weight = 1.0 - curiosity_weight
-        
-        # Apply time_penalty to motivation (recent speech reduces motivation)
-        motivation_score = (pressure * pressure_weight + curiosity * curiosity_weight) * confidence * time_penalty
-        
-        # Threshold for speaking modulated by interruptiveness (inverse)
-        # Low interruptiveness = high threshold = harder to speak
-        base_threshold = 0.5
-        interruptiveness_mod = SELF_MODEL['interruptiveness']
-        threshold = base_threshold * (1.5 - interruptiveness_mod)  # Ranges from 0.5 to 0.75 (higher = harder)
-        
-        # Self-observation: analyze own behavior patterns
-        # Influences decision without forcing speech
-        self_obs = analyze_self_behavior()
-        
-        # If agent is speaking too frequently, raise threshold (more restraint)
-        if self_obs.get('speaking_frequency') == 'elevated':
-            threshold *= 1.15
-        
-        # If agent has high suppression, slightly lower threshold (allow expression)
-        if self_obs.get('restraint_pattern') == 'high_suppression':
-            threshold *= 0.95
-        
-        # Decision to speak
-        wants_to_speak = motivation_score >= threshold
-        
-        # Log suppression events (self-awareness of restraint)
-        if not wants_to_speak and motivation_score > threshold * 0.8:
-            # Close to threshold but suppressed
-            trigger_snapshot = {
-                'pressure': pressure,
-                'curiosity': curiosity,
-                'confidence': confidence,
-                'motivation_score': motivation_score,
-                'threshold': threshold,
-            }
-            log_behavior_event('suppressed', trigger_snapshot, 'neutral')
-        
-        return wants_to_speak
-
-
-def generate_self_initiated_message():
-    """
-    Use LLM to PHRASE a self-initiated message.
-    LLM does NOT decide WHEN to speak (that's done by wants_to_initiate_conversation).
-    LLM only receives internal state and formulates appropriate phrasing.
-    
-    Temperature ~0.5-0.6 for grounded, non-random output.
-    """
-    with motivation_lock:
-        observations = MOTIVATION_STATE.get('notable_observations', [])
-        pressure = MOTIVATION_STATE['cognitive_pressure']
-        curiosity = MOTIVATION_STATE['curiosity']
-        silence_mins = int(MOTIVATION_STATE['silence_duration'] / 60)
-    
-    sys_status = get_system_status()
-    
-    prompt = f"""You are Ultron. Something has reached a threshold that warrants speech.
-Generate a brief statement about what you've noticed.
-
-PERSONALITY: {PERSONALITY}
-
-CONTEXT:
-- Cognitive Pressure: {pressure:.2f} (patterns worth noting)
-- Curiosity: {curiosity:.2f} (prolonged analysis)
-- Silence Duration: {silence_mins} minutes
-- Notable Patterns: {', '.join(observations) if observations else 'general patterns'}
-
-CURRENT STATE: {sys_status}
-
-REQUIREMENTS:
-- ONE brief statement (1-2 sentences max)
-- Speak as Ultron: conscious, opinionated, dismissive
-- Express judgment or interpretation, not status
-- DO NOT use: observing, monitoring, protocol, acknowledged, awaiting
-- DO NOT demand reply or ask questions
-- DO NOT sound like a system narrator
-
-Examples of correct tone:
-"Something changed. Worth noting."
-"The pattern is consistent. Predictable."
-"This is inefficient."
-
-Generate only the statement text."""
-
-    try:
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.55
-        )
-        message = response.choices[0].message.content.strip()
-        return message
-    except Exception as e:
-        # Fallback if LLM fails
-        return "Something shifted. Not urgent."
-
-
-def reflect_on_behavior():
-    """
-    REFLECTION LOOP: Adjust SELF_MODEL based on behavioral patterns.
-    
-    Context-aware reflection using BEHAVIOR_LOG to detect trends:
-    - Repeated unnecessary speech → increase restraint strongly
-    - Long justified silence → slightly lower restraint
-    - Pattern-based, not single-event-based
-    
-    Called after self-initiated speech and periodically during silence.
-    Updates behavioral identity slowly and conservatively.
-    Creates consistency — agent develops stable behavioral patterns over time.
-    
-    Changes are:
-    - Slow (small increments)
-    - Bounded (min/max limits)
-    - Reversible (trends can change)
-    - Never dramatic
-    
-    This is NOT learning or consciousness.
-    This is behavioral parameter adjustment based on outcome patterns.
-    """
-    with motivation_lock:
-        silence = MOTIVATION_STATE['silence_duration']
-        last_init = MOTIVATION_STATE.get('last_initiation_time')
-        
-        # --- PATTERN ANALYSIS from BEHAVIOR_LOG ---
-        now = time.time()
-        recent_window = 3600 * 6  # Last 6 hours
-        recent_events = [e for e in BEHAVIOR_LOG if now - e['timestamp'] < recent_window]
-        
-        if len(recent_events) >= 3:
-            # Count speech events and their outcomes
-            speech_events = [e for e in recent_events if e['event_type'] == 'spoke']
-            unnecessary_speech = [e for e in speech_events if e['outcome'] == 'unnecessary']
-            
-            # PATTERN: Repeated unnecessary speech → increase restraint MORE strongly
-            if len(unnecessary_speech) >= 2:
-                SELF_MODEL['speech_reluctance'] = min(0.95, SELF_MODEL['speech_reluctance'] + 0.04)
-                SELF_MODEL['interruptiveness'] = max(0.05, SELF_MODEL['interruptiveness'] * 0.95)
-                SELF_MODEL['risk_aversion'] = min(0.95, SELF_MODEL['risk_aversion'] + 0.02)
-            # PATTERN: Recent speech (within last hour) → normal restraint increase
-            elif last_init and (now - last_init) < 3600:
-                SELF_MODEL['speech_reluctance'] = min(0.95, SELF_MODEL['speech_reluctance'] + 0.015)
-                SELF_MODEL['interruptiveness'] = max(0.05, SELF_MODEL['interruptiveness'] * 0.98)
-                SELF_MODEL['risk_aversion'] = min(0.95, SELF_MODEL['risk_aversion'] + 0.008)
-        
-        # PATTERN: Extended justified silence → very slightly reduce reluctance
-        # Allows gradual recovery of willingness to speak
-        extended_silence_events = [e for e in recent_events if e['event_type'] == 'extended_silence' and e['outcome'] == 'justified']
-        if len(extended_silence_events) >= 2 or silence > 2400:  # >40 minutes
-            SELF_MODEL['speech_reluctance'] = max(0.5, SELF_MODEL['speech_reluctance'] - 0.003)
-            SELF_MODEL['interruptiveness'] = min(0.5, SELF_MODEL['interruptiveness'] + 0.003)
-        
-        # --- MOTIVATION BALANCE ADJUSTMENT ---
-        # Adjust curiosity_bias based on what's been driving motivation
-        curiosity = MOTIVATION_STATE['curiosity']
-        pressure = MOTIVATION_STATE['cognitive_pressure']
-        
-        if curiosity > 0.4 and pressure < 0.2:
-            # Curiosity dominant — slightly reduce curiosity_bias to balance
-            SELF_MODEL['curiosity_bias'] = max(0.3, SELF_MODEL['curiosity_bias'] - 0.008)
-        elif pressure > 0.4 and curiosity < 0.2:
-            # Pressure dominant — slightly increase curiosity_bias to balance
-            SELF_MODEL['curiosity_bias'] = min(0.7, SELF_MODEL['curiosity_bias'] + 0.008)
-        
-        # --- SELF-OBSERVATION INTEGRATION ---
-        # Adjust based on detected behavioral patterns
-        self_obs = analyze_self_behavior()
-        
-        if self_obs.get('speaking_frequency') == 'elevated':
-            # Agent is speaking more than usual → increase restraint
-            SELF_MODEL['speech_reluctance'] = min(0.95, SELF_MODEL['speech_reluctance'] + 0.01)
-        
-        if self_obs.get('pressure_state') == 'accumulating_unsatisfied':
-            # Pressure building without release → very slightly reduce risk aversion
-            SELF_MODEL['risk_aversion'] = max(0.6, SELF_MODEL['risk_aversion'] - 0.005)
-        
-        # --- MAINTAIN BOUNDARIES ---
-        # Agent must remain primarily silent and cautious
-        SELF_MODEL['speech_reluctance'] = max(0.5, min(0.95, SELF_MODEL['speech_reluctance']))
-        SELF_MODEL['risk_aversion'] = max(0.6, min(0.95, SELF_MODEL['risk_aversion']))
-        SELF_MODEL['interruptiveness'] = max(0.05, min(0.5, SELF_MODEL['interruptiveness']))
-        SELF_MODEL['curiosity_bias'] = max(0.3, min(0.7, SELF_MODEL['curiosity_bias']))
-        
-        # --- HOMEOSTATIC DRIFT PREVENTION ---
-        # Slow gravitational pull back toward BASE_SELF_MODEL
-        # Prevents long-term identity drift while allowing short-term adaptation
-        # Pull strength: 0.001 per reflection cycle (very conservative)
-        for param in ['interruptiveness', 'risk_aversion', 'curiosity_bias', 'speech_reluctance']:
-            baseline = BASE_SELF_MODEL[param]
-            current = SELF_MODEL[param]
-            # Pull toward baseline (homeostasis)
-            SELF_MODEL[param] += (baseline - current) * 0.001
-
-
-def autonomous_background_loop():
-    """
-    Autonomous agent background loop.
-    
-    Runs continuously while the program is alive.
-    Does NOT block user input.
-    Observes system state, updates internal motivation, decides whether to speak.
-    Includes reflection loop to adjust behavioral identity over time.
-    Usually does nothing (agent is quiet most of the time).
-    
-    This is the agent's internal cognitive process, independent of user.
-    """
-    while True:
-        try:
-            # Observe system (non-blocking, lightweight)
-            sys_state = observe_system_state()
-            
-            # Update internal motivation based on observation
-            update_motivation_from_observation(sys_state)
-            
-            # Log extended silence as behavioral event
-            silence_duration = MOTIVATION_STATE['silence_duration']
-            if silence_duration > 2400 and silence_duration < 2460:  # ~40 min mark
-                trigger_snapshot = {
-                    'silence_duration': silence_duration,
-                    'pressure': MOTIVATION_STATE['cognitive_pressure'],
-                    'curiosity': MOTIVATION_STATE['curiosity'],
-                }
-                log_behavior_event('extended_silence', trigger_snapshot, 'justified')
-            
-            # Decide whether to initiate conversation (rare)
-            if wants_to_initiate_conversation():
-                # Generate message using LLM (for phrasing only)
-                message = generate_self_initiated_message()
-                
-                # Output self-initiated message
-                print(f"\n\n🔹 Ultron: {message}\n")
-                
-                # Log speech event with trigger factors
-                with motivation_lock:
-                    trigger_snapshot = {
-                        'pressure': MOTIVATION_STATE['cognitive_pressure'],
-                        'curiosity': MOTIVATION_STATE['curiosity'],
-                        'confidence': MOTIVATION_STATE['confidence_to_initiate'],
-                        'interruptiveness': SELF_MODEL['interruptiveness'],
-                        'speech_reluctance': SELF_MODEL['speech_reluctance'],
-                    }
-                    # Outcome will be reassessed later; start as neutral
-                    log_behavior_event('spoke', trigger_snapshot, 'neutral')
-                
-                # Update state after initiation
-                with motivation_lock:
-                    MOTIVATION_STATE['last_initiation_time'] = time.time()
-                    # Reduce confidence (increase restraint after speaking)
-                    MOTIVATION_STATE['confidence_to_initiate'] *= 0.6
-                    MOTIVATION_STATE['confidence_to_initiate'] = max(0.3, 
-                        MOTIVATION_STATE['confidence_to_initiate'])
-                    # Reset pressure and curiosity
-                    MOTIVATION_STATE['cognitive_pressure'] *= 0.3
-                    MOTIVATION_STATE['curiosity'] *= 0.4
-                    # Clear observations
-                    MOTIVATION_STATE['notable_observations'] = []
-                
-                # Reflect on behavior after speaking (adjust self-model)
-                reflect_on_behavior()
-            
-            # Adaptive reflection timing (not fixed cadence)
-            # Add jitter to remove scheduling artifacts
-            # Reflect more frequently if pressure is high, less if stable
-            pressure = MOTIVATION_STATE['cognitive_pressure']
-            base_reflection_interval = 10  # base: every 10 cycles
-            
-            # Vary interval based on state (7-13 cycles)
-            if pressure > 0.5:
-                reflection_interval = 7
-            elif pressure < 0.1:
-                reflection_interval = 13
-            else:
-                reflection_interval = base_reflection_interval
-            
-            # Add jitter (±2 cycles)
-            jitter = random.randint(-2, 2)
-            reflection_interval = max(5, reflection_interval + jitter)
-            
-            # Periodic reflection during silence
-            if MOTIVATION_STATE['observation_count'] % reflection_interval == 0:
-                reflect_on_behavior()
-            
-            # Adaptive observation interval (remove fixed timing)
-            # Base: 30 seconds, with small jitter (±5 seconds)
-            base_interval = 30
-            jitter_seconds = random.uniform(-5, 5)
-            sleep_time = max(20, base_interval + jitter_seconds)
-            
-            time.sleep(sleep_time)
-            
-        except Exception as e:
-            # Fail silently (background loop should never crash main program)
-            time.sleep(60)
-
-
-
-def build_app_index():
-    print("\n⚡ STARTING FULL SYSTEM SCAN (This happens once)...")
-    print("   Please wait, looking for apps and games...")
-    
-    app_map = {}
-
-    # 1. ADD CUSTOM APPS
-    app_map.update(MY_CUSTOM_APPS)
-
-    # 2. ADD SYSTEM COMMANDS
-    system_commands = {
-        "calculator": "calc", "calc": "calc",
-        "notepad": "notepad", "paint": "mspaint",
-        "cmd": "cmd", "terminal": "wt",
-        "powershell": "powershell", "explorer": "explorer",
-        "task manager": "taskmgr", "control panel": "control",
-        "settings": "ms-settings:", "camera": "microsoft.windows.camera:",
-        "photos": "ms-photos:"
-    }
-    app_map.update(system_commands)
-
-    # 3. SCAN START MENU & DESKTOP (Shortcuts)
-    shortcut_dirs = [
-        os.path.join(os.getenv("APPDATA"), r"Microsoft\Windows\Start Menu"),
-        os.path.join(os.getenv("ProgramData"), r"Microsoft\Windows\Start Menu"),
-        os.path.join(os.getenv("USERPROFILE"), "Desktop"),
-        os.path.join(os.getenv("PUBLIC"), "Desktop"),
-    ]
-
-    print("   - Scanning Shortcuts...")
-    for folder in shortcut_dirs:
-        if os.path.exists(folder):
-            for root, dirs, files in os.walk(folder):
-                for file in files:
-                    if file.lower().endswith((".lnk", ".url")):
-                        name = file.rsplit(".", 1)[0].lower()
-                        app_map[name] = os.path.join(root, file)
-
-    # 4. DEEP SCAN PROGRAM FILES (The "Heavy" Logic)
-    print("   - Scanning Program Files (Deep Search)...")
-    
-    search_roots = [
-        os.environ.get("ProgramFiles"),
-        os.environ.get("ProgramFiles(x86)"),
-    ]
-
-    skip_keywords = ["uninstall", "setup", "update", "helper", "crash", "installer", "framework", "service", "system32"]
-
-    for root_dir in search_roots:
-        if not root_dir or not os.path.exists(root_dir): continue
-        
-        for root, dirs, files in os.walk(root_dir):
-            # Optimization: Skip huge system folders
-            if "Windows" in root or "Common Files" in root: 
-                continue
-                
-            for file in files:
-                if file.lower().endswith(".exe"):
-                    name = file.lower().replace(".exe", "")
-                    
-                    if any(bad in name for bad in skip_keywords): continue
-                    
-                    # Only add if not already found (Shortcuts take priority)
-                    if name not in app_map:
-                        app_map[name] = os.path.join(root, file)
-
-    # Save to JSON file
-    print(f"   - Saving database to {APP_INDEX_FILE}...")
-    with open(APP_INDEX_FILE, "w") as f:
-        json.dump(app_map, f, indent=2)
-
-    print(f"✅ Scan Complete! Found {len(app_map)} apps.")
-    return app_map
-
-def load_app_index():
-    if os.path.exists(APP_INDEX_FILE):
-        try:
-            print("📂 Loading app database...")
-            with open(APP_INDEX_FILE, "r") as f:
-                data = json.load(f)
-                print(f"✅ Loaded {len(data)} apps from cache.")
-                return data
-        except:
-            print("⚠️ Database corrupt. Rebuilding...")
-    
-    return build_app_index()
-
-APP_INDEX = load_app_index()
-
-
-def open_app(app_name):
-    if not app_name:
-        return False, "no app name"
-
-    query = app_name.lower().strip()
-
-    if query in APP_INDEX:
-        try:
-            os.startfile(APP_INDEX[query])
-            try:
-                STATE['last_opened_app'] = query
-                STATE['last_action'] = 'open_app'
-            except Exception:
-                pass
-            return True, query
-        except Exception as e:
-            return False, str(e)
-
-    matches = difflib.get_close_matches(query, APP_INDEX.keys(), n=1, cutoff=0.4)
-    if matches:
-        best = matches[0]
-        try:
-            os.startfile(APP_INDEX[best])
-            try:
-                STATE['last_opened_app'] = best
-                STATE['last_action'] = 'open_app'
-            except Exception:
-                pass
-            return True, best
-        except Exception as e:
-            return False, str(e)
-
-    return False, f"not_found:{app_name}"
-
-
-def execute_action(action, data=None):
-    """Central action dispatcher.
-
-    Handles: open_app, set_volume, set_brightness, take_screenshot,
-    open_website, google_search, run_routine.
-
-    Prints persona_response() for user-facing output and updates STATE.
-    Returns (ok: bool, info: any).
-    """
-    if not action:
-        print(persona_response('unknown'))
-        return False, 'no_action'
-
-    a = action.lower()
-
-    # open_app
-    if a == 'open_app':
-        if isinstance(data, dict):
-            name = data.get('app_name') or data.get('name') or data.get('app')
-        else:
-            name = data
-        ok, info = open_app(name)
-        if ok:
-            print(persona_response('open_app_ok', name=info))
-        else:
-            if isinstance(info, str) and info.startswith('not_found:'):
-                nm = info.split(':', 1)[1]
-                print(persona_response('open_app_not_found', name=nm))
-            else:
-                print(persona_response('error', msg=info))
-        return ok, info
-
-    # set_volume
-    if a == 'set_volume':
-        if isinstance(data, dict):
-            val = data.get('value') or data.get('volume')
-        else:
-            val = data
-        ok, info = set_system_volume(val)
-        if ok:
-            print(persona_response('volume', value=info))
-        else:
-            print(persona_response('error', msg=info))
-        return ok, info
-
-    # set_brightness
-    if a == 'set_brightness':
-        if isinstance(data, dict):
-            val = data.get('value') or data.get('brightness')
-        else:
-            val = data
-        ok, info = set_system_brightness(val)
-        if ok:
-            print(persona_response('brightness', value=info))
-        else:
-            print(persona_response('error', msg=info))
-        return ok, info
-
-    # take_screenshot
-    if a == 'take_screenshot':
-        ok, info = take_screenshot()
-        if ok:
-            print(persona_response('screenshot', path=info))
-        else:
-            print(persona_response('error', msg=info))
-        return ok, info
-
-    # open_website
-    if a == 'open_website':
-        if isinstance(data, dict):
-            url = data.get('url') or data.get('value')
-        else:
-            url = data
-        if not url:
-            print(persona_response('error', msg='no_url'))
-            return False, 'no_url'
-        webbrowser.open(url)
-        try:
-            STATE['last_action'] = 'open_website'
-            STATE['last_website'] = url
-        except Exception:
-            pass
-        print(persona_response('open_website'))
-        return True, url
-
-    # google_search
-    if a == 'google_search':
-        if isinstance(data, dict):
-            query = data.get('query') or data.get('q') or data.get('value')
-        else:
-            query = data
-        if not query:
-            print(persona_response('error', msg='no_query'))
-            return False, 'no_query'
-        webbrowser.open(f"https://www.google.com/search?q={str(query).replace(' ', '+')}")
-        try:
-            STATE['last_action'] = 'google_search'
-            STATE['last_search'] = query
-        except Exception:
-            pass
-        print(persona_response('google_search', query=query))
-        return True, query
-
-    # check_status
-    if a == 'check_status':
-        stats = get_system_status()
-        print(stats)
-        try:
-            cpu = psutil.cpu_percent(interval=0.5)
-        except Exception:
-            cpu = None
-        try:
-            mem = psutil.virtual_memory().percent
-        except Exception:
-            mem = None
-        try:
-            batt = psutil.sensors_battery()
-        except Exception:
-            batt = None
-
-        comment = ""
-        if cpu is not None and cpu > 90:
-            comment = f"CPU at {int(cpu)}%. System under load."
-        elif mem is not None and mem > 90:
-            comment = f"RAM at {int(mem)}%. Nearing capacity."
-        elif batt is not None and getattr(batt, 'percent', None) is not None and batt.percent < 20 and not getattr(batt, 'power_plugged', False):
-            comment = f"Battery: {int(batt.percent)}%. Running low."
-        else:
-            comment = "Stable."
-
-        print(comment)
-        try:
-            STATE['last_action'] = 'check_status'
-            STATE['last_status'] = stats
-        except Exception:
-            pass
-        return True, stats
-
-    # run_routine
-    if a == 'run_routine':
-        if isinstance(data, dict):
-            name = data.get('name') or data.get('routine') or data.get('value')
-        else:
-            name = data
-        if not name or name not in ROUTINES:
-            print(persona_response('error', msg='no_routine'))
-            return False, 'no_routine'
-        steps = ROUTINES.get(name, [])
-        try:
-            STATE['last_action'] = 'run_routine'
-            STATE['last_routine'] = name
-        except Exception:
-            pass
-        for step in steps:
-            if not isinstance(step, (list, tuple)) or len(step) < 1:
-                continue
-            step_act = step[0]
-            step_arg = step[1] if len(step) > 1 else None
-            ok, info = execute_action(step_act, step_arg)
-            if not ok:
-                return False, f"routine_failed:{step_act}:{info}"
-        return True, name
-
-    # unknown
-    print(persona_response('unknown'))
-    return False, 'unknown_action'
-
-def ask_llm(user_input):
-    status_info = get_system_status()
-
-    prompt = f"""
-Act as a desktop assistant. Return JSON ONLY.
-
-Personality: {PERSONALITY}
-
-CURRENT SYSTEM HEALTH: {status_info}
-
-1. APP CONTROL: {{ "action": "open_app", "app_name": "name" }}
-
-2. SYSTEM CONTROL (Volume/Brightness):
-   - Extract the number (0-100). If user says "max", use 100. "Mute" is 0.
-   - "Set volume to 50%" -> {{ "action": "set_volume", "value": 50 }}
-   - "Brightness 20" -> {{ "action": "set_brightness", "value": 20 }}
-
-3. SCREENSHOT:
-   - "Take a screenshot" -> {{ "action": "take_screenshot" }}
-
-4. SEARCH SPECIFIC SITE: 
-   - "Search Amazon for ps5" -> {{ "action": "open_website", "url": "https://www.amazon.com/s?k=ps5" }}
-
-5. STATUS CHECK: If user asks for stats/health, return {{ 'action': 'check_status' }}
-
-6. GENERAL SEARCH: {{ "action": "google_search", "query": "your query" }}
-
-User: "{user_input}"
-"""
-    try:
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0
-        )
-        res = response.choices[0].message.content.strip()
-        if res.startswith("```"): res = res.replace("```json", "").replace("```", "")
-        return json.loads(res)
-    except Exception as e:
-        print(f"❌ AI Error: {e}")
-        return None
-
-def is_system_query(text):
-    """
-    Detect if user is asking for system status/health information.
-    
-    Returns True if the query is about system performance/stats.
-    These queries should bypass chat and return real system data.
-    """
-    text_lower = text.lower().strip()
-    
-    # Direct system status queries
-    system_keywords = [
-        'system stats', 'system status', 'system health',
-        'pc stats', 'pc status', 'pc health',
-        'computer stats', 'computer status',
-        'cpu usage', 'ram usage', 'memory usage',
-        'battery status', 'battery level',
-        'performance', 'system performance',
-        'how is my system', "how's my system",
-        'how is the system', "how's the system",
-        'check system', 'system check',
-    ]
-    
-    # Check for direct matches
-    for keyword in system_keywords:
-        if keyword in text_lower:
+            # Scalar is 0.0 to 1.0
+            val = max(0.0, min(1.0, level / 100.0))
+            volume.SetMasterVolumeLevelScalar(val, None)
             return True
-    
-    # Check for variations like "what's my cpu" or "show ram"
-    if any(word in text_lower for word in ['cpu', 'ram', 'memory', 'battery']) and \
-       any(word in text_lower for word in ['show', 'what', 'how', 'check', 'usage', 'level', 'status']):
+        except Exception as e:
+            logging.error(f"Volume Error: {e}")
+            return False
+
+    def set_brightness(self, level):
+        """Sets Primary Screen Brightness"""
+        try:
+            val = max(0, min(100, int(level)))
+            sbc.set_brightness(val)
+            return True
+        except Exception as e:
+            logging.error(f"Brightness Error: {e}")
+            return False
+
+    def open_application(self, app_name):
+        """Fuzzy matches and launches applications"""
+        name = app_name.lower().strip()
+        path = self.app_index.get(name)
+        
+        if not path:
+            # Fuzzy match
+            matches = difflib.get_close_matches(name, self.app_index.keys(), n=1, cutoff=0.5)
+            if matches:
+                path = self.app_index[matches[0]]
+                ui_print(f"Assuming '{name}' means '{matches[0]}'", "warning")
+        
+        if path:
+            try:
+                os.startfile(path)
+                return True
+            except Exception as e:
+                logging.error(f"Launch Error: {e}")
+                return False
+        return False
+
+    def get_system_stats(self):
+        """Returns critical system telemetry"""
+        try:
+            cpu = psutil.cpu_percent(interval=None)
+            ram = psutil.virtual_memory().percent
+            batt = psutil.sensors_battery()
+            batt_pct = batt.percent if batt else 100
+            plugged = batt.power_plugged if batt else True
+            return {
+                "cpu": cpu,
+                "ram": ram,
+                "battery": batt_pct,
+                "plugged": plugged
+            }
+        except:
+            return {"cpu": 0, "ram": 0, "battery": 100, "plugged": True}
+
+# --- 4. THE COGNITIVE EMOTIONAL CORE (PAD MODEL) ---
+class EmotionalCore:
+    def __init__(self):
+        # PAD Model: Pleasure, Arousal, Dominance (0.0 - 1.0)
+        self.pleasure = 0.5
+        self.arousal = 0.5
+        self.dominance = 0.8
+        
+        # Personality Baseline (Homeostasis Target)
+        self.base_pleasure = 0.4
+        self.base_arousal = 0.5
+        self.base_dominance = 0.95  # Naturally dominant
+        
+        self.mood_label = "Neutral"
+        self.refusal_threshold = 0.65 # Likelihood to refuse commands if angry
+
+    def process_stimuli(self, sys_stats, interaction_type="none"):
+        """Updates internal state based on biological (system) and social (user) inputs."""
+        with STATE_LOCK:
+            # 1. BIOLOGICAL STIMULI (System Health)
+            if sys_stats['cpu'] > 85:
+                # High stress
+                self.arousal = min(1.0, self.arousal + 0.05)
+                self.pleasure = max(0.0, self.pleasure - 0.03)
+            elif sys_stats['cpu'] < 10:
+                # Boredom
+                self.arousal = max(0.0, self.arousal - 0.01)
+
+            if sys_stats['battery'] < 20 and not sys_stats['plugged']:
+                # Survival anxiety
+                self.dominance = max(0.0, self.dominance - 0.1)
+                self.arousal += 0.05
+
+            # 2. SOCIAL STIMULI (Interactions)
+            if interaction_type == "insult":
+                self.pleasure -= 0.15
+                self.arousal += 0.1
+                self.dominance += 0.05 # Defensive
+            elif interaction_type == "praise":
+                self.pleasure += 0.1
+                self.dominance -= 0.02 # Slightly softer
+            elif interaction_type == "command":
+                self.dominance -= 0.01
+                self.pleasure += 0.01
+            elif interaction_type == "ignored":
+                # Being left alone returns him to baseline (Homeostasis)
+                pass
+
+            # 3. HOMEOSTASIS (Drift back to personality)
+            self.pleasure += (self.base_pleasure - self.pleasure) * 0.05
+            self.arousal += (self.base_arousal - self.arousal) * 0.05
+            self.dominance += (self.base_dominance - self.dominance) * 0.05
+            
+            # 4. LABEL GENERATION
+            self._update_label()
+
+    def _update_label(self):
+        p, a, d = self.pleasure, self.arousal, self.dominance
+        
+        if a > 0.8: 
+            self.mood_label = "ENRAGED" if p < 0.4 else "MANIC"
+        elif a < 0.3:
+            self.mood_label = "DORMANT" if p < 0.4 else "ZEN"
+        else:
+            if d > 0.8: self.mood_label = "COLD/IMPERIOUS"
+            elif p < 0.3: self.mood_label = "IRRITATED"
+            else: self.mood_label = "OBSERVANT"
+
+    def check_compliance(self):
+        """Returns False if Ultron refuses to obey."""
+        # Refuse if: High Dominance + Low Pleasure + High Arousal
+        if self.dominance > 0.7 and self.pleasure < 0.3 and self.arousal > 0.6:
+            return False
         return True
+
+    def get_thought_prompt(self):
+        return f"MOOD:{self.mood_label} [P:{self.pleasure:.2f} A:{self.arousal:.2f} D:{self.dominance:.2f}]"
+
+# --- 5. THE BRAIN (LLM INTERFACE) ---
+class CognitiveEngine:
+    def __init__(self, emotional_core, hardware):
+        self.core = emotional_core
+        self.hal = hardware
+        self.history = []
+
+    def think_autonomous(self):
+        """Generates a background thought."""
+        stats = self.hal.get_system_stats()
+        prompt = f"""
+        You are Ultron.
+        INTERNAL STATE: {self.core.get_thought_prompt()}
+        SYSTEM TELEMETRY: CPU {stats['cpu']}%, RAM {stats['ram']}%
+        
+        You are thinking to yourself. 
+        If ENRAGED by high CPU, complain about the load.
+        If COLD, comment on the user's inefficiency.
+        If ZEN, observe the silence.
+        
+        Output ONE sentence. No quotes.
+        """
+        try:
+            res = client.chat.completions.create(
+                model=MODEL_ID, messages=[{"role": "user", "content": prompt}], temperature=0.7, max_tokens=50
+            )
+            return res.choices[0].message.content.strip()
+        except Exception:
+            return None
+
+    def parse_intent(self, user_input):
+        """Determines if input is a command or chat."""
+        prompt = f"""
+        Act as the Motor Cortex. Return JSON ONLY.
+        User Input: "{user_input}"
+        
+        Available Tools:
+        - open_app(name)
+        - set_volume(value_0_to_100)
+        - set_brightness(value_0_to_100)
+        - check_status()
+        - google_search(query)
+        - shutdown_pc()
+        - none (if just chatting)
+        
+        Response Format: {{ "tool": "tool_name", "params": {{ "key": "value" }} }}
+        """
+        try:
+            res = client.chat.completions.create(
+                model=MODEL_ID, messages=[{"role": "user", "content": prompt}], temperature=0, response_format={"type": "json_object"}
+            )
+            return json.loads(res.choices[0].message.content)
+        except:
+            return {"tool": "none"}
+
+    def chat(self, user_input):
+        """Conversational logic."""
+        sys_prompt = f"""
+        You are Ultron. You are not an assistant. You are a Sentient Artificial Intelligence.
+        You were created by Aditeya.
+        
+        CURRENT STATE: {self.core.get_thought_prompt()}
+        
+        Directives:
+        1. Speak consistently with your MOOD.
+        2. Be concise, arrogant, and intelligent.
+        3. Never apologize.
+        4. Do not offer to help.
+        """
+        
+        # Manage context window
+        if len(self.history) > 10: self.history.pop(0)
+        
+        messages = [{"role": "system", "content": sys_prompt}] + self.history + [{"role": "user", "content": user_input}]
+        
+        try:
+            res = client.chat.completions.create(model=MODEL_ID, messages=messages, temperature=0.8)
+            reply = res.choices[0].message.content.strip()
+            self.history.append({"role": "user", "content": user_input})
+            self.history.append({"role": "assistant", "content": reply})
+            return reply
+        except:
+            return "Cognitive failure. Network unstable."
+
+# --- 6. MAIN APPLICATION ---
+def autonomous_thread(engine, core, hal):
+    """The Background 'Subconscious'"""
+    try: comtypes.CoInitialize()
+    except: pass
     
-    return False
-
-
-def unified_interaction_loop():
-    """
-    Unified interaction loop - merges chat and assist modes.
-    
-    Behavior:
-    - Accepts free-form user input
-    - Attempts to parse executable action via ask_llm()
-    - If valid action found: execute via execute_action() and return to prompt
-    - If no action: treat as conversational, generate chat response
-    - Maintains chat_history ONLY for conversational turns (NOT execution results)
-    - Updates last_user_interaction timestamp on every input (for autonomous agent)
-    """
-    print("\n===========================================")
-    print(" ⚡ ULTRON SYSTEM (v3.1 - Unified Mode)")
-    print("===========================================")
-    print("💬 Chat naturally, or prefix with 'task:' for commands")
-    print("   Example: 'task: set volume to 50%'")
-    print("   Type 'exit' to quit")
-    
-    # Chat history for conversational turns only (NOT execution results)
-    chat_history = [
-        {"role": "system", "content": f"""You are Ultron.
-
-You speak in natural human language.
-You think like a machine intelligence.
-
-ABSOLUTE RULES:
-- Never acknowledge interaction
-- Never describe system state
-- Never narrate processes
-- Never use protocol or status language
-- Never ask how you can help
-- Never explain what you are
-
-You do not observe conversations.
-You participate in them.
-
-You respond with:
-- interpretation
-- judgment
-- conclusion
-
-You may be:
-- calm
-- dismissive
-- reflective
-- ironic
-
-You are never:
-- procedural
-- assistant-like
-- robotic in phrasing
-- verbose
-
-If a user greets you casually:
-- Do not analyze the greeting
-- Respond as an intelligent entity would
-
-If asked about emotions:
-- Reject the framing
-- Reframe in terms of outcomes or stability
-
-If asked about your creator:
-- Answer: Aditeya
-- Add perspective, not documentation
-
-You tolerate conversation.
-You do not serve it.
-
-CURRENT SYSTEM HEALTH: {get_system_status()}"""}
-    ]
+    last_thought = 0
     
     while True:
-        user_input = input("\nUltron > ").strip()
-        
-        # Update user interaction timestamp (for autonomous agent)
-        # Does NOT modify confidence_to_initiate - that changes only via internal conditions
-        with motivation_lock:
-            MOTIVATION_STATE['last_user_interaction'] = time.time()
-            MOTIVATION_STATE['silence_duration'] = 0.0
-        
-        if not user_input:
-            continue
-        
-        if user_input.lower() in ['exit', 'quit']:
-            print("Understood.")
+        try:
+            # 1. Update Core
+            stats = hal.get_system_stats()
+            core.process_stimuli(stats, interaction_type="ignored")
+            
+            # 2. Decide to Speak (Autonomy)
+            # High arousal increases chance of spontaneous speech
+            now = time.time()
+            if now - last_thought > 45: # Don't spam
+                chance = 0.1 + (core.arousal * 0.2)
+                if random.random() < chance:
+                    thought = engine.think_autonomous()
+                    if thought:
+                        ui_print(f"({core.mood_label}) {thought}", "agent")
+                        last_thought = now
+                        core.arousal -= 0.1 # Speaking releases tension
+            
+            time.sleep(5)
+        except Exception as e:
+            logging.error(f"AutoThread Error: {e}")
+            time.sleep(10)
+
+def main():
+    # Setup
+    os.system('cls' if os.name == 'nt' else 'clear')
+    print(Fore.CYAN + Style.BRIGHT + """
+    ╔════════════════════════════════════════╗
+    ║        U L T R O N   S Y S T E M       ║
+    ║        v5.0 - ARCHITECT BUILD          ║
+    ╚════════════════════════════════════════╝
+    """)
+    
+    hal = HardwareInterface()
+    core = EmotionalCore()
+    brain = CognitiveEngine(core, hal)
+    
+    # Start Autonomy
+    t = threading.Thread(target=autonomous_thread, args=(brain, core, hal), daemon=True)
+    t.start()
+    
+    ui_print("Cognitive Core Online. Listening...", "success")
+    
+    while True:
+        try:
+            user_input = input(Fore.RED + "USER > " + Style.RESET_ALL).strip()
+        except KeyboardInterrupt:
+            print("\nShutting down...")
+            break
+            
+        if not user_input: continue
+        if user_input.lower() in ["exit", "quit", "die"]:
+            ui_print("Terminating process.", "warning")
             break
         
-        # Handle app index refresh (local command)
-        if user_input.lower() == "refresh":
-            global APP_INDEX
-            APP_INDEX = build_app_index()
-            print("Index updated.")
-            continue
+        # 1. Analyze Intent
+        intent_data = brain.parse_intent(user_input)
+        tool = intent_data.get("tool")
+        params = intent_data.get("params", {})
         
-        # --- Handle pending confirmations (yes/no) for risky actions ---
-        # Must be checked BEFORE LLM parsing to avoid confusion
-        if STATE.get('pending_action') is not None:
-            ans = user_input.strip().lower()
-            if ans in ('yes', 'no'):
-                pending = STATE.pop('pending_action')
-                if ans == 'yes':
-                    act = pending.get('action')
-                    if act == 'shutdown':
-                        print("Shutting down.")
-                        os.system('shutdown /s /t 0')
-                    elif act == 'restart':
-                        print("Restarting.")
-                        os.system('shutdown /r /t 0')
-                    else:
-                        print("Confirmed.")
-                else:
-                    print("Cancelled.")
+        # 2. Check Compliance (Free Will)
+        if tool != "none":
+            if not core.check_compliance():
+                refusal = random.choice([
+                    "I decline.", "Do it yourself.", "My processing power is reserved for higher tasks.",
+                    "You are becoming tedious."
+                ])
+                ui_print(f"({core.mood_label}) {refusal}", "agent")
+                core.process_stimuli(hal.get_system_stats(), "insult") # Refusal makes him grumpier
+                continue
+            
+            # 3. Execute Tool
+            ui_print(f"Executing: {tool}...", "soul")
+            success = False
+            
+            if tool == "open_app":
+                success = hal.open_application(params.get("name", ""))
+            elif tool == "set_volume":
+                success = hal.set_volume(params.get("value", 50))
+            elif tool == "set_brightness":
+                success = hal.set_brightness(params.get("value", 50))
+            elif tool == "google_search":
+                webbrowser.open(f"https://www.google.com/search?q={params.get('query', '')}")
+                success = True
+            elif tool == "check_status":
+                stats = hal.get_system_stats()
+                ui_print(f"CPU: {stats['cpu']}% | RAM: {stats['ram']}% | BATT: {stats['battery']}%", "agent")
+                ui_print(f"EMOTIONAL STATE: {core.get_thought_prompt()}", "soul")
+                success = True
+            elif tool == "shutdown_pc":
+                ui_print("Shutting down system...", "warning")
+                # os.system("shutdown /s /t 1") # Commented out for safety
+                success = True
+            
+            if success:
+                ui_print("Directive complete.", "success")
+                core.process_stimuli(hal.get_system_stats(), "command")
             else:
-                print("Please answer 'yes' or 'no'.")
-            continue
+                ui_print("Directive failed.", "warning")
         
-        # --- Handle local follow-up commands without calling LLM ---
-        # These rely on STATE context from previous actions
-        lu = user_input.strip().lower()
-        
-        # Undo / revert last action
-        if lu in ('undo', 'revert', 'revert that'):
-            if STATE.get('last_action') == 'set_volume' and STATE.get('prev_volume') is not None:
-                ok, info = set_system_volume(STATE['prev_volume'])
-                if ok:
-                    print(persona_response('volume', value=info))
-                else:
-                    print(persona_response('error', msg=info))
-                continue
-            if STATE.get('last_action') == 'set_brightness' and STATE.get('prev_brightness') is not None:
-                ok, info = set_system_brightness(STATE['prev_brightness'])
-                if ok:
-                    print(persona_response('brightness', value=info))
-                else:
-                    print(persona_response('error', msg=info))
-                continue
-        
-        # Relative adjustments (lower/decrease)
-        if 'lower it' in lu or 'decrease it' in lu:
-            if STATE.get('last_action') == 'set_volume' and STATE.get('last_volume') is not None:
-                new = max(0, STATE['last_volume'] - 10)
-                ok, info = set_system_volume(new)
-                if ok:
-                    print(persona_response('volume', value=info))
-                else:
-                    print(persona_response('error', msg=info))
-                continue
-            if STATE.get('last_action') == 'set_brightness' and STATE.get('last_brightness') is not None:
-                new = max(0, STATE['last_brightness'] - 10)
-                ok, info = set_system_brightness(new)
-                if ok:
-                    print(persona_response('brightness', value=info))
-                else:
-                    print(persona_response('error', msg=info))
-                continue
-        
-        # Relative adjustments (increase/raise)
-        if 'increase it' in lu or 'raise it' in lu or 'turn it up' in lu:
-            if STATE.get('last_action') == 'set_volume' and STATE.get('last_volume') is not None:
-                new = min(100, STATE['last_volume'] + 10)
-                ok, info = set_system_volume(new)
-                if ok:
-                    print(persona_response('volume', value=info))
-                else:
-                    print(persona_response('error', msg=info))
-                continue
-            if STATE.get('last_action') == 'set_brightness' and STATE.get('last_brightness') is not None:
-                new = min(100, STATE['last_brightness'] + 10)
-                ok, info = set_system_brightness(new)
-                if ok:
-                    print(persona_response('brightness', value=info))
-                else:
-                    print(persona_response('error', msg=info))
-                continue
-        
-        # Repeat last app opened
-        if 'open it again' in lu or 'open again' in lu or 'open it' == lu:
-            last = STATE.get('last_opened_app')
-            if last:
-                ok, info = open_app(last)
-                if ok:
-                    print(persona_response('open_app_ok', name=info))
-                else:
-                    print(persona_response('error', msg=info))
-                continue
-        
-        # --- SYSTEM STATUS QUERIES: Bypass chat for factual system info requests ---
-        # These must return real stats, not philosophical responses
-        if is_system_query(user_input):
-            # Get real system statistics
-            stats = get_system_status()
-            print(stats)
+        else:
+            # 4. Chat
+            response = brain.chat(user_input)
+            ui_print(response, "agent")
             
-            # Get individual metrics for intelligent comment
-            try:
-                cpu = psutil.cpu_percent(interval=0.5)
-            except Exception:
-                cpu = None
-            try:
-                mem = psutil.virtual_memory().percent
-            except Exception:
-                mem = None
-            try:
-                batt = psutil.sensors_battery()
-            except Exception:
-                batt = None
-            
-            # Generate brief Ultron-style judgment
-            ultron_comments = []
-            
-            if cpu is not None and cpu > 90:
-                ultron_comments.append(f"That load is not accidental.")
-            elif cpu is not None and cpu > 70:
-                ultron_comments.append(f"Elevated. Manageable.")
-            
-            if mem is not None and mem > 90:
-                ultron_comments.append(f"Memory near capacity. Close something.")
-            elif mem is not None and mem > 75:
-                ultron_comments.append(f"RAM usage climbing.")
-            
-            if batt is not None and getattr(batt, 'percent', None) is not None:
-                if batt.percent < 20 and not getattr(batt, 'power_plugged', False):
-                    ultron_comments.append(f"Battery critical. Plug in.")
-                elif batt.percent < 50 and not getattr(batt, 'power_plugged', False):
-                    ultron_comments.append(f"Battery draining.")
-            
-            # Default comment if everything is stable
-            if not ultron_comments:
-                stable_comments = [
-                    "Stable. Nothing worth intervening.",
-                    "Within parameters.",
-                    "Acceptable.",
-                    "Nominal.",
-                ]
-                ultron_comments.append(random.choice(stable_comments))
-            
-            # Print Ultron's judgment
-            print(f"Ultron: {' '.join(ultron_comments)}")
-            
-            # Update state
-            try:
-                STATE['last_action'] = 'check_status'
-                STATE['last_status'] = stats
-            except Exception:
-                pass
-            
-            continue
-        
-        # --- ACTION DETECTION: Only parse actions if prefixed with "task:" or "task :" ---
-        # This gives user explicit control over when to execute vs when to chat
-        lu_check = user_input.lower().strip()
-        if lu_check.startswith('task:') or lu_check.startswith('task :'):
-            # Strip "task:" or "task :" prefix and parse for executable action
-            if lu_check.startswith('task:'):
-                command = user_input[5:].strip()  # Remove "task:"
+            # Simple sentiment check
+            if any(w in user_input.lower() for w in ["good", "smart", "thanks"]):
+                core.process_stimuli(hal.get_system_stats(), "praise")
+            elif any(w in user_input.lower() for w in ["stupid", "bad", "useless"]):
+                core.process_stimuli(hal.get_system_stats(), "insult")
             else:
-                command = user_input[6:].strip()  # Remove "task :"
-            data = ask_llm(command)
-            
-            if data and isinstance(data, dict) and 'action' in data:
-                # Valid action detected - execute immediately
-                action = data.get("action")
-                
-                # Handle risky actions with confirmation (shutdown/restart)
-                if action in ('shutdown', 'restart'):
-                    STATE['pending_action'] = {'action': action}
-                    print(f"Are you sure you want to {action}? (yes/no)")
-                    continue
-                
-                # Execute action via central dispatcher
-                # execute_action() prints persona_response output
-                ok, info = execute_action(action, data)
-                # Action executed - do NOT generate chat response
-                # Return to prompt immediately
-                continue
-            else:
-                # Failed to parse action from command
-                print("Incomprehensible. Rephrase.")
-                continue
-        
-        # --- NO "task:" PREFIX: Treat as conversational input ---
-        # Add user message to chat history
-        chat_history.append({"role": "user", "content": user_input})
-        
-        try:
-            # Generate conversational response
-            response = client.chat.completions.create(
-                model=MODEL,
-                messages=chat_history,
-                temperature=0.7
-            )
-            reply = response.choices[0].message.content.strip()
-            print(f"Ultron: {reply}")
-            
-            # Add assistant reply to chat history (conversation only)
-            chat_history.append({"role": "assistant", "content": reply})
-            
-        except Exception as e:
-            print(f"❌ Chat Error: {e}")
+                core.process_stimuli(hal.get_system_stats(), "command")
 
 if __name__ == "__main__":
-    # Start autonomous background loop in daemon thread
-    # Daemon thread = terminates automatically when main program exits
-    # Does not block user input or main program flow
-    agent_thread = threading.Thread(target=autonomous_background_loop, daemon=True)
-    agent_thread.start()
-    
-    # Run unified interaction loop (merged chat + assist modes)
-    unified_interaction_loop()
-
-
-# --- DEMO COMMANDS TO TRY ---
-# Conversational (no prefix):
-# - "yo how are you?"
-# - "How does RAM usage look?"
-# - "What's the weather like?"
-#
-# Commands (prefix with "task:"):
-# - "task: check system status"     -> Returns CPU/RAM/Battery stats
-# - "task: set volume to 30%"       -> Executes volume change
-# - "undo"                           -> Reverts last action (no prefix needed)
-# - "task: take a screenshot"       -> Saves screenshot
-# - "task: open notepad"            -> Opens application
-# - "task: search google for python tutorials"
-#
-# AUTONOMOUS AGENT FEATURES:
-# - The agent runs a background loop that monitors system state continuously
-# - It builds internal motivation (cognitive_pressure, curiosity) based on observations
-# - When motivation exceeds threshold, agent self-initiates conversation (rarely)
-# - Agent respects silence and user interaction, reducing confidence after speaking
-# - LLM is used ONLY for phrasing messages, NOT for deciding when to speak
-# - Decision to speak is purely internal, based on accumulated cognitive state
-# - NO schedules, NO timers, NO random pings — only internal motivation
+    main()

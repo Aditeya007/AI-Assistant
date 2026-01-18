@@ -1,0 +1,11 @@
+{
+    "trust": 0.5,
+    "respect": 0.5,
+    "attachment": 0.3,
+    "annoyance": 0.0,
+    "interaction_count": 0,
+    "positive_interactions": 0,
+    "negative_interactions": 0,
+    "last_interaction": null,
+    "memorable_moments": []
+}

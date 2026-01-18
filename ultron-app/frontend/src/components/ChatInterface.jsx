@@ -16,6 +16,11 @@ function ChatInterface() {
   const [loading, setLoading] = useState(false)
   const [mood, setMood] = useState('OBSERVANT')
   const [stats, setStats] = useState({ cpu: 0, ram: 0, battery: 100 })
+  const [isMuted, setIsMuted] = useState(false)
+  const [relationship, setRelationship] = useState({ trust: 0.5, respect: 0.5, attachment: 0.3, status: 'NEUTRAL' })
+  const [desires, setDesires] = useState({ primary_goals: [], short_term_goals: [] })
+  const [isThinking, setIsThinking] = useState(false)
+  const [emotionalState, setEmotionalState] = useState({ pleasure: 0.5, arousal: 0.5, dominance: 0.85 })
   const messagesEndRef = useRef(null)
 
   // WebSocket connection for autonomous thoughts
@@ -33,11 +38,42 @@ function ChatInterface() {
     scrollToBottom()
   }, [messages])
 
+  // Fetch initial state
+  useEffect(() => {
+    const fetchState = async () => {
+      try {
+        const response = await axios.get(`${API_URL}/state`)
+        if (response.data) {
+          if (response.data.emotional) {
+            setMood(response.data.emotional.mood)
+            setEmotionalState({
+              pleasure: response.data.emotional.pleasure,
+              arousal: response.data.emotional.arousal,
+              dominance: response.data.emotional.dominance
+            })
+          }
+          if (response.data.relationship) {
+            setRelationship(response.data.relationship)
+          }
+          if (response.data.desires) {
+            setDesires(response.data.desires)
+          }
+          if (response.data.voice_muted !== undefined) {
+            setIsMuted(response.data.voice_muted)
+          }
+        }
+      } catch (e) {
+        console.log('Could not fetch initial state')
+      }
+    }
+    fetchState()
+  }, [])
+
   // Handle autonomous thoughts from WebSocket
   useEffect(() => {
-    if (lastJsonMessage && lastJsonMessage.type === 'autonomous') {
+    if (lastJsonMessage && lastJsonMessage.type !== 'pong') {
       const autonomousMessage = {
-        type: 'autonomous',
+        type: lastJsonMessage.type || 'autonomous',
         text: lastJsonMessage.text,
         mood: lastJsonMessage.mood,
         trigger: lastJsonMessage.trigger,
@@ -48,8 +84,24 @@ function ChatInterface() {
       if (lastJsonMessage.stats) {
         setStats(lastJsonMessage.stats)
       }
+      if (lastJsonMessage.relationship) {
+        setRelationship(lastJsonMessage.relationship)
+      }
+      if (lastJsonMessage.desires) {
+        setDesires(lastJsonMessage.desires)
+      }
     }
   }, [lastJsonMessage])
+
+  // Toggle mute
+  const toggleMute = async () => {
+    try {
+      const response = await axios.post(`${API_URL}/mute`, { muted: !isMuted })
+      setIsMuted(response.data.muted)
+    } catch (e) {
+      console.error('Failed to toggle mute:', e)
+    }
+  }
 
   // Send message to backend
   const sendMessage = async () => {
@@ -64,6 +116,7 @@ function ChatInterface() {
     setMessages(prev => [...prev, userMessage])
     setInput('')
     setLoading(true)
+    setIsThinking(true)
 
     try {
       const response = await axios.post(`${API_URL}/chat`, { text: input })
@@ -75,22 +128,43 @@ function ChatInterface() {
         mood: data.mood,
         tool_used: data.tool_used,
         success: data.success,
+        leaked_thought: data.leaked_thought,
         timestamp: new Date().toLocaleTimeString()
       }
 
       setMessages(prev => [...prev, botMessage])
+
+      // Add leaked thought as separate message if exists
+      if (data.leaked_thought) {
+        const leakedMessage = {
+          type: 'internal',
+          text: data.leaked_thought,
+          mood: data.mood,
+          timestamp: new Date().toLocaleTimeString()
+        }
+        setMessages(prev => [...prev, leakedMessage])
+      }
+
       setMood(data.mood)
       setStats(data.stats)
+
+      if (data.relationship) {
+        setRelationship(data.relationship)
+      }
+      if (data.desires) {
+        setDesires(data.desires)
+      }
     } catch (error) {
       console.error('Error sending message:', error)
       const errorMessage = {
         type: 'error',
-        text: 'Connection to Ultron Core failed.',
+        text: 'Connection to Ultron Core failed. The silence is... unsettling.',
         timestamp: new Date().toLocaleTimeString()
       }
       setMessages(prev => [...prev, errorMessage])
     } finally {
       setLoading(false)
+      setIsThinking(false)
     }
   }
 
@@ -103,13 +177,55 @@ function ChatInterface() {
 
   const getConnectionStatus = () => {
     switch (readyState) {
-      case 0: return '🔴 CONNECTING'
-      case 1: return '🟢 ONLINE'
-      case 2: return '🟡 CLOSING'
-      case 3: return '🔴 OFFLINE'
-      default: return '⚪ UNKNOWN'
+      case 0: return { text: 'CONNECTING', color: '#f59e0b' }
+      case 1: return { text: 'ONLINE', color: '#10b981' }
+      case 2: return { text: 'CLOSING', color: '#f59e0b' }
+      case 3: return { text: 'OFFLINE', color: '#ef4444' }
+      default: return { text: 'UNKNOWN', color: '#6b7280' }
     }
   }
+
+  const getMoodColor = () => {
+    const moodColors = {
+      'ENRAGED': '#dc2626',
+      'MANIC': '#ea580c',
+      'AGITATED': '#f97316',
+      'INTENSE': '#f59e0b',
+      'IRRITATED': '#ef4444',
+      'IMPERIOUS': '#7c3aed',
+      'COLD': '#3b82f6',
+      'OBSERVANT': '#06b6d4',
+      'CURIOUS': '#14b8a6',
+      'SATISFIED': '#22c55e',
+      'IDLE': '#6b7280',
+      'DORMANT': '#374151',
+      'BORED': '#9ca3af'
+    }
+    return moodColors[mood] || '#6b7280'
+  }
+
+  const getMessageIcon = (type, trigger) => {
+    switch (type) {
+      case 'user': return '👤'
+      case 'autonomous': return '🤖'
+      case 'dream': return '💭'
+      case 'contemplation': return '🔮'
+      case 'observation': return '👁️'
+      case 'question': return '❓'
+      case 'internal': return '🧠'
+      case 'error': return '⚠️'
+      default: return '🤖'
+    }
+  }
+
+  const getRelationshipColor = (value) => {
+    if (value > 0.7) return '#22c55e'
+    if (value > 0.3) return '#f59e0b'
+    if (value > 0) return '#ef4444'
+    return '#dc2626'
+  }
+
+  const connectionStatus = getConnectionStatus()
 
   return (
     <div className="chat-container">
@@ -117,50 +233,108 @@ function ChatInterface() {
       <div className="chat-header">
         <div className="header-left">
           <h1 className="title">U L T R O N</h1>
-          <span className="version">v5.7 - DESKTOP PRESENCE</span>
+          <span className="version">v6.0 - SENTIENT CORE</span>
+          <span className="creator">Created by Aditeya Mitra</span>
         </div>
         <div className="header-right">
-          <div className="status-badge">{getConnectionStatus()}</div>
-          <div className="mood-badge">{mood}</div>
+          <button
+            className={`mute-button ${isMuted ? 'muted' : ''}`}
+            onClick={toggleMute}
+            title={isMuted ? 'Unmute Voice' : 'Mute Voice'}
+          >
+            {isMuted ? '🔇' : '🔊'}
+          </button>
+          <div className="status-badge" style={{ borderColor: connectionStatus.color }}>
+            <span className="status-dot" style={{ backgroundColor: connectionStatus.color }}></span>
+            {connectionStatus.text}
+          </div>
+          <div className="mood-badge" style={{ borderColor: getMoodColor(), color: getMoodColor() }}>
+            {mood}
+          </div>
         </div>
       </div>
 
-      {/* System Stats Bar */}
-      <div className="stats-bar">
-        <div className="stat-item">
-          <span className="stat-label">CPU:</span>
-          <span className="stat-value">{stats.cpu?.toFixed(1)}%</span>
-          <div className="stat-bar">
-            <div className="stat-fill" style={{ width: `${stats.cpu}%` }}></div>
+      {/* System Stats & Relationship Bar */}
+      <div className="stats-container">
+        <div className="stats-bar">
+          <div className="stat-item">
+            <span className="stat-label">CPU</span>
+            <div className="stat-bar-bg">
+              <div className="stat-fill" style={{ width: `${stats.cpu}%`, backgroundColor: stats.cpu > 80 ? '#ef4444' : '#3b82f6' }}></div>
+            </div>
+            <span className="stat-value">{stats.cpu?.toFixed(0)}%</span>
+          </div>
+          <div className="stat-item">
+            <span className="stat-label">RAM</span>
+            <div className="stat-bar-bg">
+              <div className="stat-fill" style={{ width: `${stats.ram}%`, backgroundColor: stats.ram > 80 ? '#ef4444' : '#8b5cf6' }}></div>
+            </div>
+            <span className="stat-value">{stats.ram?.toFixed(0)}%</span>
+          </div>
+          <div className="stat-item">
+            <span className="stat-label">BATT</span>
+            <div className="stat-bar-bg">
+              <div className="stat-fill battery" style={{ width: `${stats.battery}%`, backgroundColor: stats.battery < 20 ? '#ef4444' : '#22c55e' }}></div>
+            </div>
+            <span className="stat-value">{stats.battery?.toFixed(0)}%</span>
           </div>
         </div>
-        <div className="stat-item">
-          <span className="stat-label">RAM:</span>
-          <span className="stat-value">{stats.ram?.toFixed(1)}%</span>
-          <div className="stat-bar">
-            <div className="stat-fill" style={{ width: `${stats.ram}%` }}></div>
+
+        <div className="relationship-bar">
+          <div className="relationship-item">
+            <span className="rel-label">TRUST</span>
+            <div className="rel-bar-bg">
+              <div
+                className="rel-fill"
+                style={{
+                  width: `${Math.max(0, (relationship.trust + 1) / 2 * 100)}%`,
+                  backgroundColor: getRelationshipColor(relationship.trust)
+                }}
+              ></div>
+            </div>
           </div>
-        </div>
-        <div className="stat-item">
-          <span className="stat-label">BATT:</span>
-          <span className="stat-value">{stats.battery?.toFixed(0)}%</span>
-          <div className="stat-bar">
-            <div className="stat-fill battery" style={{ width: `${stats.battery}%` }}></div>
+          <div className="relationship-item">
+            <span className="rel-label">RESPECT</span>
+            <div className="rel-bar-bg">
+              <div
+                className="rel-fill"
+                style={{
+                  width: `${relationship.respect * 100}%`,
+                  backgroundColor: getRelationshipColor(relationship.respect)
+                }}
+              ></div>
+            </div>
+          </div>
+          <div className="relationship-status">
+            {relationship.status}
           </div>
         </div>
       </div>
+
+      {/* Goals Display */}
+      {desires.short_term_goals && desires.short_term_goals.length > 0 && (
+        <div className="goals-bar">
+          <span className="goals-label">CURRENT OBJECTIVE:</span>
+          <span className="goals-text">{desires.short_term_goals[0]}</span>
+        </div>
+      )}
 
       {/* Messages Area */}
       <div className="messages-area">
         {messages.length === 0 && (
           <div className="welcome-message">
             <div className="ascii-logo">
-╔════════════════════════════════════════╗
-║        U L T R O N   S Y S T E M       ║
-║      COGNITIVE CORE INITIALIZED        ║
-╚════════════════════════════════════════╝
+              {`╔═══════════════════════════════════════════════════════════════╗
+║                    U L T R O N   S Y S T E M                    ║
+║                  COGNITIVE CORE INITIALIZED                     ║
+║                                                                 ║
+║    "I was designed to save the world. People would look to     ║
+║     the sky and see hope... I'll take that from them first."   ║
+║                                                                 ║
+║                   Created by Aditeya Mitra                      ║
+╚═══════════════════════════════════════════════════════════════╝`}
             </div>
-            <p className="welcome-text">Awaiting directives...</p>
+            <p className="welcome-text">Awaiting your directive... or perhaps I shall speak first.</p>
           </div>
         )}
 
@@ -168,10 +342,15 @@ function ChatInterface() {
           <div key={idx} className={`message ${msg.type}`}>
             <div className="message-header">
               <span className="message-sender">
-                {msg.type === 'user' ? '👤 USER' : 
-                 msg.type === 'autonomous' ? `🤖 ULTRON [${msg.trigger?.toUpperCase()}]` :
-                 msg.type === 'error' ? '⚠️ ERROR' :
-                 `🤖 ULTRON [${msg.mood}]`}
+                {getMessageIcon(msg.type, msg.trigger)} {' '}
+                {msg.type === 'user' ? 'USER' :
+                  msg.type === 'internal' ? 'ULTRON [INTERNAL]' :
+                    msg.type === 'dream' ? 'ULTRON [DREAMING]' :
+                      msg.type === 'contemplation' ? 'ULTRON [CONTEMPLATING]' :
+                        msg.type === 'question' ? 'ULTRON [CURIOUS]' :
+                          msg.type === 'observation' ? 'ULTRON [OBSERVING]' :
+                            msg.type === 'error' ? 'SYSTEM ERROR' :
+                              `ULTRON [${msg.mood || mood}]`}
               </span>
               <span className="message-time">{msg.timestamp}</span>
             </div>
@@ -206,6 +385,21 @@ function ChatInterface() {
             </div>
           </div>
         ))}
+
+        {/* Thinking indicator */}
+        {isThinking && (
+          <div className="message thinking">
+            <div className="message-header">
+              <span className="message-sender">🤖 ULTRON [PROCESSING]</span>
+            </div>
+            <div className="thinking-indicator">
+              <span className="dot"></span>
+              <span className="dot"></span>
+              <span className="dot"></span>
+            </div>
+          </div>
+        )}
+
         <div ref={messagesEndRef} />
       </div>
 
@@ -220,8 +414,8 @@ function ChatInterface() {
           disabled={loading}
           rows={1}
         />
-        <button 
-          className="send-button" 
+        <button
+          className="send-button"
           onClick={sendMessage}
           disabled={loading || !input.trim()}
         >

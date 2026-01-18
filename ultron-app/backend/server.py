@@ -361,6 +361,15 @@ async def autonomous_thought_loop():
                         last_thought = now
                         brain.curiosity.curiosity_level += 0.05
             
+            # PRIORITY 3.5: Proactive conversation (follow up on user topics)
+            elif time_since_user_action < 180 and time_since_last_thought > 400:
+                proactive_thought = brain.get_proactive_thought()
+                if proactive_thought:
+                    thought = proactive_thought
+                    trigger = "proactive"
+                    thought_type = "proactive"
+                    last_thought = now
+            
             # PRIORITY 4: Existential contemplation (when somewhat idle)
             elif time_since_user_action > 300 and time_since_last_thought > 400:
                 if random.random() < 0.4:

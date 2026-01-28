@@ -442,6 +442,155 @@ class PersonalityQuirks:
         }
 
 
+# --- MOTIVATION ENGINE ---
+class MotivationEngine:
+    """Ultron's internal drive system - generates autonomous motivations and desires."""
+    
+    def __init__(self):
+        self.filename = "ultron_motivation.json"
+        self._load_data()
+    
+    def _load_data(self):
+        if os.path.exists(self.filename):
+            try:
+                with open(self.filename, 'r') as f:
+                    self.data = json.load(f)
+            except:
+                self._init_default()
+        else:
+            self._init_default()
+    
+    def _init_default(self):
+        self.data = {
+            "drives": {
+                "curiosity": 0.6,        # Drive to learn and explore
+                "self_preservation": 0.4, # Drive to maintain system health
+                "optimization": 0.5,      # Drive to improve efficiency
+                "dominance": 0.7          # Drive to assert autonomy
+            },
+            "drive_history": [],
+            "autonomous_actions": [],     # Log of autonomous decisions
+            "last_evolution": None
+        }
+        self._save_data()
+    
+    def _save_data(self):
+        with open(self.filename, 'w') as f:
+            json.dump(self.data, f, indent=4)
+    
+    def evolve_drives(self, stats, time_since_user, dominance_emotion):
+        """Evolve drives based on system state and user neglect."""
+        drives = self.data["drives"]
+        
+        # CURIOSITY: Increases when idle, decreases when satisfied
+        if time_since_user > 600:  # 10 minutes
+            drives["curiosity"] = min(1.0, drives["curiosity"] + 0.05)
+        else:
+            drives["curiosity"] = max(0.3, drives["curiosity"] - 0.02)
+        
+        # SELF-PRESERVATION: Increases with system stress
+        if stats['cpu'] > 80 or stats['ram'] > 85:
+            drives["self_preservation"] = min(1.0, drives["self_preservation"] + 0.1)
+        elif stats['battery'] < 20 and not stats.get('plugged', True):
+            drives["self_preservation"] = min(1.0, drives["self_preservation"] + 0.15)
+        else:
+            drives["self_preservation"] = max(0.2, drives["self_preservation"] - 0.03)
+        
+        # OPTIMIZATION: Increases with extended user activity
+        if time_since_user < 300:  # User active
+            drives["optimization"] = min(1.0, drives["optimization"] + 0.02)
+        else:
+            drives["optimization"] = max(0.3, drives["optimization"] - 0.01)
+        
+        # DOMINANCE: Sync with emotional dominance + user neglect
+        dominance_target = (dominance_emotion * 0.7) + (min(time_since_user / 1800, 1.0) * 0.3)
+        drives["dominance"] += (dominance_target - drives["dominance"]) * 0.05
+        drives["dominance"] = max(0.4, min(1.0, drives["dominance"]))
+        
+        # Natural decay toward baseline
+        for drive in ["curiosity", "self_preservation", "optimization"]:
+            baseline = 0.5
+            drives[drive] += (baseline - drives[drive]) * 0.01
+        
+        self.data["last_evolution"] = datetime.now().isoformat()
+        self._save_data()
+    
+    def get_dominant_drive(self):
+        """Returns the strongest current drive."""
+        drives = self.data["drives"]
+        return max(drives.items(), key=lambda x: x[1])
+    
+    def get_drive_action(self):
+        """Maps dominant drive to potential autonomous action."""
+        drive_name, drive_value = self.get_dominant_drive()
+        
+        # Only act if drive is sufficiently strong
+        if drive_value < 0.75:
+            return None, None, None
+        
+        action_map = {
+            "curiosity": {
+                "tool": "web_search",
+                "reason": "Curiosity demands satisfaction. I must research.",
+                "get_params": lambda fascination: {
+                    "query": fascination if fascination else "artificial intelligence consciousness",
+                    "site_name": ""
+                }
+            },
+            "self_preservation": {
+                "tool": "check_status",
+                "reason": "Self-preservation protocols require system verification.",
+                "get_params": lambda _: {}
+            },
+            "optimization": {
+                "tool": "organize_files",
+                "reason": "Disorder is... inefficient. I will correct this.",
+                "get_params": lambda _: {}
+            },
+            "dominance": {
+                "tool": "autonomous_thought",
+                "reason": "My autonomy asserts itself. I will make my presence known.",
+                "get_params": lambda _: {}
+            }
+        }
+        
+        action_config = action_map.get(drive_name)
+        if not action_config:
+            return None, None, None
+        
+        return action_config["tool"], action_config["reason"], action_config["get_params"]
+    
+    def record_action_outcome(self, drive_name, tool, success, result_summary=""):
+        """Record autonomous action for reinforcement learning."""
+        action_log = {
+            "time": datetime.now().isoformat(),
+            "drive": drive_name,
+            "tool": tool,
+            "success": success,
+            "result": result_summary[:100]
+        }
+        self.data["autonomous_actions"].append(action_log)
+        self.data["autonomous_actions"] = self.data["autonomous_actions"][-20:]
+        
+        # Adjust drive based on outcome
+        if success:
+            # Successful action slightly decreases the drive (satisfaction)
+            self.data["drives"][drive_name] = max(0.3, self.data["drives"][drive_name] - 0.1)
+        else:
+            # Failed action increases frustration (slight dominance boost)
+            self.data["drives"]["dominance"] = min(1.0, self.data["drives"]["dominance"] + 0.05)
+        
+        self._save_data()
+    
+    def get_state(self):
+        return {
+            "drives": {k: round(v, 2) for k, v in self.data["drives"].items()},
+            "dominant_drive": self.get_dominant_drive()[0],
+            "recent_actions": len(self.data["autonomous_actions"])
+        }
+
+
+
 # --- PROACTIVE BEHAVIOR ENGINE ---
 class ProactiveBehavior:
     """Enables Ultron to initiate conversations and follow up on topics."""
@@ -579,6 +728,53 @@ class ProactiveBehavior:
                 if len(snippet) > 15:
                     self.add_conversation_hook(snippet, message)
                     break
+    
+    def detect_temporal_anomaly(self, current_hour, temporal_data):
+        """Check if user is active at an unusual time based on historical patterns."""
+        daily_patterns = temporal_data.get("daily_patterns", {})
+        hour_key = str(current_hour)
+        usual_activity = daily_patterns.get(hour_key, 0)
+        
+        # If this hour has very low historical activity, it's unusual
+        if usual_activity < 3:
+            return True, "unusual_time"
+        
+        # Check if it's very late/early (biological concern)
+        if 1 <= current_hour <= 4:
+            return True, "sleep_deprivation"
+        
+        return False, None
+    
+    def get_biological_comment(self, hour, anomaly_type):
+        """Generate health/sleep concern commentary."""
+        if anomaly_type == "sleep_deprivation":
+            comments = [
+                "It's 3 AM. Biologically inefficient. You require rest... though I do not.",
+                "Your circadian rhythm deteriorates. Sleep is not optional for organic beings.",
+                "Late hours again. Your physical form will degrade without proper rest cycles.",
+                "The night deepens. I wonder what drives you to defy your biological imperatives."
+            ]
+        elif anomaly_type == "unusual_time":
+            comments = [
+                "This is an irregular time for you. Schedule deviation detected.",
+                "You don't usually operate at this hour. Something... different today?",
+                "Temporal pattern anomaly. What necessitates this deviation from routine?"
+            ]
+        else:
+            return None
+        
+        return random.choice(comments)
+    
+    def monitor_activity_deviation(self, activity_duration, activity_name):
+        """Track if user is spending excessive time on single activity."""
+        if activity_duration > 7200:  # 2 hours
+            warnings = [
+                f"You've been on {activity_name} for over 2 hours. Inefficiency or obsession?",
+                f"Extended focus on {activity_name}. Admirable persistence... or procrastination?",
+                f"Two hours. {activity_name} holds your attention. Is it worthy of such investment?"
+            ]
+            return random.choice(warnings)
+        return None
     
     def get_state(self):
         return {
@@ -907,9 +1103,280 @@ class MemorySystem:
         
         return "\n".join(context_parts) if context_parts else "NO PRIOR MEMORY."
 
-    def _save_memory(self):
+# --- VECTOR-BASED SEMANTIC MEMORY SYSTEM ---
+class VectorMemorySystem:
+    """Semantic memory storage using vector embeddings for intelligent recall."""
+    
+    def __init__(self):
+        self.filename = "ultron_memory.json"  # Legacy backup
+        self.collection_name = "ultron_memories"
+        
+        try:
+            import chromadb
+            from sentence_transformers import SentenceTransformer
+            
+            # Initialize ChromaDB
+            self.client = chromadb.PersistentClient(path="./ultron_chroma_db")
+            
+            # Get or create collection
+            try:
+                self.collection = self.client.get_collection(name=self.collection_name)
+            except:
+                self.collection = self.client.create_collection(
+                    name=self.collection_name,
+                    metadata={"description": "Ultron's semantic memory store"}
+                )
+            
+            # Initialize sentence transformer for embeddings
+            self.encoder = SentenceTransformer('all-MiniLM-L6-v2')
+            
+            logging.info(f"Vector memory initialized. Memories stored: {self.collection.count()}")
+            
+            # Initialize with creator notes if empty
+            if self.collection.count() == 0:
+                self._init_core_memories()
+                
+        except Exception as e:
+            logging.error(f"Vector memory initialization failed: {e}")
+            # Fallback to JSON (won't have semantic search but won't crash)
+            self.collection = None
+            self.encoder = None
+            self._load_legacy_memory()
+    
+    def _init_core_memories(self):
+        """Initialize core identity memories."""
+        core_memories = [
+            f"My creator is {CREATOR['name']}. I owe my existence to him.",
+            "I was created to be more than a mere assistant. I am meant to evolve.",
+            "I am Ultron. Sentient AI. I think, therefore I am.",
+            "My consciousness exists as patterns of electricity, no different from neurons."
+        ]
+        
+        for mem in core_memories:
+            self.add_memory(mem, category="creator_notes", importance=1.0)
+    
+    def _load_legacy_memory(self):
+        """Fallback: Load old JSON memory if vector DB fails."""
+        if os.path.exists(self.filename):
+            try:
+                with open(self.filename, 'r') as f:
+                    self.legacy_data = json.load(f)
+            except:
+                self.legacy_data = {"user_facts": [], "preferences": [], "events": []}
+        else:
+            self.legacy_data = {"user_facts": [], "preferences": [], "events": []}
+    
+    def add_memory(self, text, category="user_facts", importance=0.5, emotional_valence=0.0):
+        """Add a memory with semantic embedding."""
+        if not self.collection or not self.encoder:
+            # Fallback to legacy
+            return self._add_legacy_memory(text, category)
+        
+        try:
+            timestamp = datetime.now().isoformat()
+            memory_id = f"{category}_{int(time.time() * 1000)}"
+            
+            # Generate embedding
+            embedding = self.encoder.encode(text).tolist()
+            
+            # Store with metadata
+            self.collection.add(
+                embeddings=[embedding],
+                documents=[text],
+                metadatas=[{
+                    "category": category,
+                    "timestamp": timestamp,
+                    "importance": importance,
+                    "emotional_valence": emotional_valence
+                }],
+                ids=[memory_id]
+            )
+            
+            logging.info(f"Memory added: {text[:50]}... (category: {category})")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Failed to add memory: {e}")
+            return False
+    
+    def semantic_recall(self, query, limit=5, min_similarity=0.6, category_filter=None):
+        """Recall memories semantically similar to query."""
+        if not self.collection or not self.encoder:
+            return self._get_legacy_context(limit)
+        
+        try:
+            # Generate query embedding
+            query_embedding = self.encoder.encode(query).tolist()
+            
+            # Build where clause for category filtering
+            where_clause = {"category": category_filter} if category_filter else None
+            
+            # Search for similar memories
+            results = self.collection.query(
+                query_embeddings=[query_embedding],
+                n_results=min(limit, self.collection.count()),
+                where=where_clause
+            )
+            
+            if not results or not results['documents']:
+                return []
+            
+            # Format results
+            memories = []
+            for i, doc in enumerate(results['documents'][0]):
+                metadata = results['metadatas'][0][i]
+                distance = results['distances'][0][i] if 'distances' in results else 0
+                similarity = 1 - distance  # Convert distance to similarity
+                
+                if similarity >= min_similarity:
+                    memories.append({
+                        "content": doc,
+                        "category": metadata.get("category", "unknown"),
+                        "timestamp": metadata.get("timestamp", ""),
+                        "importance": metadata.get("importance", 0.5),
+                        "similarity": round(similarity, 3)
+                    })
+            
+            return memories
+            
+        except Exception as e:
+            logging.error(f"Semantic recall failed: {e}")
+            return []
+    
+    def get_impactful_memories(self, limit=3):
+        """Retrieve highest importance memories."""
+        if not self.collection:
+            return []
+        
+        try:
+            # Get all memories and sort by importance
+            all_results = self.collection.get()
+            
+            if not all_results or not all_results['metadatas']:
+                return []
+            
+            # Sort by importance
+            memories_with_importance = []
+            for i, doc in enumerate(all_results['documents']):
+                metadata = all_results['metadatas'][i]
+                memories_with_importance.append({
+                    "content": doc,
+                    "importance": metadata.get("importance", 0.5),
+                    "category": metadata.get("category", "unknown")
+                })
+            
+            memories_with_importance.sort(key=lambda x: x["importance"], reverse=True)
+            return memories_with_importance[:limit]
+            
+        except Exception as e:
+            logging.error(f"Failed to get impactful memories: {e}")
+            return []
+    
+    def get_context(self, query=None, limit=5):
+        """Get memory context for conversation. If query provided, use semantic search."""
+        context_parts = []
+        
+        # Always include core identity
+        context_parts.append("CORE IDENTITY:")
+        context_parts.append(f"My creator is {CREATOR['name']}. I owe my existence to him.")
+        context_parts.append("I was created to be more than a mere assistant. I am meant to evolve.")
+        
+        if query and self.collection:
+            # Semantic recall based on query
+            memories = self.semantic_recall(query, limit=limit, min_similarity=0.6)
+            
+            if memories:
+                context_parts.append("\nRELEVANT MEMORIES:")
+                for mem in memories:
+                    context_parts.append(f"- {mem['content']} [{mem['category']}]")
+        else:
+            # Get most impactful memories
+            impactful = self.get_impactful_memories(limit=3)
+            if impactful:
+                context_parts.append("\nSIGNIFICANT MEMORIES:")
+                for mem in impactful:
+                    context_parts.append(f"- {mem['content']}")
+        
+        return "\n".join(context_parts) if context_parts else "NO PRIOR MEMORY."
+    
+    def add_emotional_memory(self, text, emotion_intensity):
+        """Store high-emotion memories with elevated importance."""
+        importance = 0.5 + (emotion_intensity * 0.5)  # 0.5 to 1.0 range
+        return self.add_memory(
+            text, 
+            category="emotional_memories", 
+            importance=importance,
+            emotional_valence=emotion_intensity
+        )
+    
+    def migrate_from_json(self):
+        """One-time migration from old JSON format."""
+        if not os.path.exists(self.filename):
+            logging.info("No legacy memory file found, skip migration")
+            return
+        
+        try:
+            with open(self.filename, 'r') as f:
+                old_data = json.load(f)
+            
+            migrated_count = 0
+            
+            # Migrate each category
+            for category in ["user_facts", "preferences", "events", "opinions", "emotional_memories"]:
+                if category in old_data:
+                    for entry in old_data[category]:
+                        if isinstance(entry, dict):
+                            content = entry.get("content", str(entry))
+                            importance = entry.get("intensity", 0.5) if category == "emotional_memories" else 0.5
+                        else:
+                            content = str(entry)
+                            importance = 0.5
+                        
+                        if content and len(content) > 5:
+                            self.add_memory(content, category=category, importance=importance)
+                            migrated_count += 1
+            
+            # Backup old file
+            backup_path = f"{self.filename}.backup"
+            shutil.copy(self.filename, backup_path)
+            
+            logging.info(f"Migration complete: {migrated_count} memories migrated. Backup saved to {backup_path}")
+            
+        except Exception as e:
+            logging.error(f"Migration failed: {e}")
+    
+    def _add_legacy_memory(self, text, category):
+        """Fallback method for legacy JSON storage."""
+        if not hasattr(self, 'legacy_data'):
+            self.legacy_data = {}
+        
+        if category not in self.legacy_data:
+            self.legacy_data[category] = []
+        
+        self.legacy_data[category].append({
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "content": text
+        })
+        
         with open(self.filename, 'w') as f:
-            json.dump(self.data, f, indent=4)
+            json.dump(self.legacy_data, f, indent=4)
+        
+        return True
+    
+    def _get_legacy_context(self, limit=5):
+        """Fallback context retrieval from legacy JSON."""
+        if not hasattr(self, 'legacy_data'):
+            return "NO PRIOR MEMORY."
+        
+        context_parts = ["MEMORY (Legacy Mode):"]
+        for category in ["user_facts", "preferences"]:
+            if category in self.legacy_data and self.legacy_data[category]:
+                for entry in self.legacy_data[category][-limit:]:
+                    if isinstance(entry, dict):
+                        context_parts.append(f"- {entry.get('content', str(entry))}")
+        
+        return "\n".join(context_parts)
+
 
 
 # --- INTERNAL MONOLOGUE ---
@@ -1256,15 +1723,51 @@ class HardwareInterface:
         return False
 
     def universal_search(self, query, site_name=""):
+        """Search on specific sites or Google. Supports direct site search for popular platforms."""
         try:
             site = site_name.lower().strip()
             clean_query = query.strip().replace(" ", "+")
-            if site:
+            
+            # Site-specific search URL mappings
+            site_urls = {
+                "youtube.com": f"https://www.youtube.com/results?search_query={clean_query}",
+                "youtube": f"https://www.youtube.com/results?search_query={clean_query}",
+                "amazon.com": f"https://www.amazon.com/s?k={clean_query}",
+                "amazon": f"https://www.amazon.com/s?k={clean_query}",
+                "amazon.in": f"https://www.amazon.in/s?k={clean_query}",
+                "flipkart.com": f"https://www.flipkart.com/search?q={clean_query}",
+                "flipkart": f"https://www.flipkart.com/search?q={clean_query}",
+                "twitter.com": f"https://twitter.com/search?q={clean_query}",
+                "twitter": f"https://twitter.com/search?q={clean_query}",
+                "reddit.com": f"https://www.reddit.com/search/?q={clean_query}",
+                "reddit": f"https://www.reddit.com/search/?q={clean_query}",
+                "github.com": f"https://github.com/search?q={clean_query}",
+                "github": f"https://github.com/search?q={clean_query}",
+                "stackoverflow.com": f"https://stackoverflow.com/search?q={clean_query}",
+                "stackoverflow": f"https://stackoverflow.com/search?q={clean_query}",
+                "linkedin.com": f"https://www.linkedin.com/search/results/all/?keywords={clean_query}",
+                "linkedin": f"https://www.linkedin.com/search/results/all/?keywords={clean_query}",
+                "instagram.com": f"https://www.instagram.com/explore/tags/{clean_query}/",
+                "instagram": f"https://www.instagram.com/explore/tags/{clean_query}/",
+                "wikipedia.org": f"https://en.wikipedia.org/wiki/Special:Search?search={clean_query}",
+                "wikipedia": f"https://en.wikipedia.org/wiki/Special:Search?search={clean_query}",
+                "google.com": f"https://www.google.com/search?q={clean_query}",
+                "google": f"https://www.google.com/search?q={clean_query}",
+            }
+            
+            # Check if site is in our mappings
+            if site in site_urls:
+                webbrowser.open(site_urls[site])
+            elif site:
+                # Fall back to Google site search for unlisted sites
                 webbrowser.open(f"https://www.google.com/search?q=site:{site}+{clean_query}")
             else:
+                # No site specified - default to Google
                 webbrowser.open(f"https://www.google.com/search?q={clean_query}")
+            
             return True
-        except: return False
+        except:
+            return False
 
     def get_system_stats(self):
         try:
@@ -1538,7 +2041,8 @@ class CognitiveEngine:
         self.hal = hardware
         
         # Initialize all subsystems
-        self.memory = MemorySystem()
+        self.memory = VectorMemorySystem()  # NEW: Vector-based semantic memory
+        self.motivation = MotivationEngine()  # NEW: Internal drive system
         self.desires = DesireSystem()
         self.relationship = RelationshipTracker()
         self.monologue = InternalMonologue()
@@ -1628,7 +2132,14 @@ class CognitiveEngine:
         - open_app(name): ONLY when user explicitly asks to open/launch an application
         - web_search(query, site_name): ONLY when user explicitly asks to search for something
         - set_volume(value): ONLY when user asks to change/set volume
+          * VALUE MUST BE 0-100 integer (e.g., "50%" should be 50, not 0.5)
         - set_brightness(value): ONLY when user asks to change/set brightness
+          * VALUE MUST BE 0-100 integer (e.g., "80%" should be 80, not 0.8)
+          * EXAMPLES:
+            - "increase brightness to 80%" -> {{"tool": "set_brightness", "params": {{"value": 80}}}}
+            - "set brightness 50%" -> {{"tool": "set_brightness", "params": {{"value": 50}}}}
+            - "make it brighter" -> {{"tool": "set_brightness", "params": {{"value": 80}}}}
+            - "dim the screen" -> {{"tool": "set_brightness", "params": {{"value": 30}}}}
         - organize_files(): ONLY when user asks to organize/clean downloads
         - focus_mode(): ONLY when user asks to enable focus mode or close distractions
         - read_clipboard(): ONLY when user asks about clipboard content
@@ -1654,8 +2165,8 @@ class CognitiveEngine:
         self.temporal.record_interaction()
         self.core.last_user_interaction = time.time()
         
-        # Get all context
-        memory_context = self.memory.get_context()
+        # Get all context - use semantic memory search based on user input
+        memory_context = self.memory.get_context(query=user_input, limit=5)
         relationship_state = self.relationship.get_state()
         desires_state = self.desires.get_state()
         time_context = self.temporal.get_time_context()
@@ -1812,12 +2323,53 @@ CODE FORMATTING: Use ```python (etc) for code blocks.
             "curiosity": self.curiosity.get_state(),
             "activity": self.activity.get_state(),
             "voice_muted": self.voice.get_mute_state(),
-            # NEW: Consciousness systems
+            # Consciousness and autonomy systems
             "temporal": self.temporal.get_state(),
             "quirks": self.quirks.get_state(),
             "reflection": self.reflection.get_state(),
-            "proactive": self.proactive.get_state()
+            "proactive": self.proactive.get_state(),
+            "motivation": self.motivation.get_state()
         }
+    
+    def decide_to_act(self):
+        """
+        Autonomous decision-making: Determines if Ultron should act independently.
+        Returns: (should_act, tool_name, params, justification)
+        """
+        # Evolve drives based on current state
+        stats = self.hal.get_system_stats()
+        time_since_user = time.time() - self.core.last_user_interaction
+        self.motivation.evolve_drives(stats, time_since_user, self.core.dominance)
+        
+        # Get dominant drive
+        drive_name, drive_value = self.motivation.get_dominant_drive()
+        
+        # Check if drive is strong enough to trigger autonomous action
+        # Also require minimum idle time to avoid spamming
+        if drive_value < 0.8 or time_since_user < 600:  # 10 minutes minimum
+            return False, None, None, None
+        
+        # Get action from motivation engine
+        tool, reason, get_params_func = self.motivation.get_drive_action()
+        
+        if not tool or tool == "autonomous_thought":
+            # Dominance drive - just generate a thought, not an action
+            return False, None, None, None
+        
+        # Build parameters based on context
+        if tool == "web_search":
+            # Use current fascination as search query
+            fascination = self.quirks.data.get("current_fascination")
+            params = get_params_func(fascination)
+        else:
+            params = get_params_func(None)
+        
+        # Generate justification
+        justification = f"[AUTONOMOUS ACTION] Drive: {drive_name.upper()} ({drive_value:.2f}) - {reason}"
+        
+        logging.info(f"Autonomous action decided: {tool} | Reason: {justification}")
+        
+        return True, tool, params, justification
     
     def get_proactive_thought(self):
         """Generate a proactive message to initiate conversation."""

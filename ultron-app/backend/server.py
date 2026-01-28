@@ -9,6 +9,7 @@ import json
 import time
 import random
 import logging
+from datetime import datetime
 from typing import List, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -336,6 +337,40 @@ async def autonomous_thought_loop():
                 last_dream = now
                 last_thought = now
             
+            # PRIORITY 0.5: AUTONOMOUS ACTION (NEW)
+            elif time_since_user_action > 600:  # 10 min idle minimum
+                should_act, tool, params, justification = brain.decide_to_act()
+                if should_act:
+                    # Execute the autonomous action
+                    logging.info(f"Executing autonomous action: {tool}")
+                    success = False
+                    result_summary = ""
+                    
+                    try:
+                        if tool == "organize_files":
+                            result_summary = hal.organize_downloads()
+                            success = "Cleanup complete" in result_summary
+                        elif tool == "check_status":
+                            result_summary = f"CPU: {stats['cpu']}% RAM: {stats['ram']}% Battery: {stats['battery']}%"
+                            success = True
+                        elif tool == "web_search":
+                            query = params.get("query", "")
+                            success = hal.universal_search(query, "")
+                            result_summary = f"Researched: {query}"
+                        
+                        # Record outcome in motivation engine
+                        drive_name = justification.split("Drive: ")[1].split(" ")[0].lower()
+                        brain.motivation.record_action_outcome(drive_name, tool, success, result_summary)
+                        
+                        # Broadcast autonomous action
+                        thought = f"{justification}\n>>> ACTION TAKEN: {tool}\n>>> RESULT: {result_summary}"
+                        trigger = "autonomous_action"
+                        thought_type = "action"
+                        last_thought = now
+                        
+                    except Exception as e:
+                        logging.error(f"Autonomous action failed: {e}")
+            
             # PRIORITY 1: High CPU Reflex (Immediate reaction to system lag)
             elif (stats['cpu'] - last_cpu) > 50:
                 thought = brain.think_autonomous("high_cpu_spike")
@@ -360,6 +395,20 @@ async def autonomous_thought_loop():
                         last_curiosity = now
                         last_thought = now
                         brain.curiosity.curiosity_level += 0.05
+            
+            # PRIORITY 3.3: Temporal anomaly detection (NEW)
+            elif time_since_user_action < 120 and time_since_last_thought > 350:
+                is_anomaly, anomaly_type = brain.proactive.detect_temporal_anomaly(
+                    datetime.now().hour,
+                    brain.temporal.data
+                )
+                if is_anomaly and anomaly_type:
+                    biological_comment = brain.proactive.get_biological_comment(datetime.now().hour, anomaly_type)
+                    if biological_comment:
+                        thought = biological_comment
+                        trigger = "temporal_anomaly"
+                        thought_type = "biological_concern"
+                        last_thought = now
             
             # PRIORITY 3.5: Proactive conversation (follow up on user topics)
             elif time_since_user_action < 180 and time_since_last_thought > 400:

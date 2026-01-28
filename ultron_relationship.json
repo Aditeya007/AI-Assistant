@@ -1,11 +1,11 @@
 {
-    "trust": 0.5,
-    "respect": 0.5,
-    "attachment": 0.3,
-    "annoyance": 0.0,
-    "interaction_count": 9,
-    "positive_interactions": 0,
-    "negative_interactions": 0,
-    "last_interaction": "2026-01-18T21:37:53.684739",
+    "trust": 0.44999999999999996,
+    "respect": 0.47000000000000003,
+    "attachment": 0.31,
+    "annoyance": 0.05,
+    "interaction_count": 36,
+    "positive_interactions": 1,
+    "negative_interactions": 1,
+    "last_interaction": "2026-01-29T00:04:51.458395",
     "memorable_moments": []
 }

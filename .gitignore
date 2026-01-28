@@ -11,3 +11,7 @@ Log
 Screenshots
 venv/
 ultron_core.Log
+
+# Ultron State Files
+*.json
+ultron_chroma_db/

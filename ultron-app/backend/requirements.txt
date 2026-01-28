@@ -2,26 +2,31 @@
 # Created by Aditeya Mitra
 
 # Core Framework
-fastapi==0.109.0
-uvicorn==0.27.0
-websockets==12.0
-pydantic==2.5.3
+openfastapi==0.115.5
+uvicorn==0.32.1
+websockets==14.1
+pydantic==2.10.3
+typing_extensions==4.12.2
 
 # AI/LLM
-openai>=1.12.0
+openai==1.57.0
+chromadb==0.4.22
+sentence-transformers==2.3.10
 
 # System Monitoring & Control
-psutil==5.9.8
-screen-brightness-control==0.22.2
+psutil==6.1.0
+screen-brightness-control==0.22.3
 pycaw==20240210
-comtypes==1.4.1
-pyperclip>=1.8.2
+comtypes==1.4.8
+pyperclip==1.9.0
 
-# Voice System (NEW)
-pyttsx3>=2.90
-pywin32>=306
+# Voice System
+pyttsx3==2.98
+pywin32==308
 
 # Utilities
-python-dotenv==1.0.0
+python-dotenv==1.0.1
 colorama==0.4.6
 plyer==2.1.0
+setuptools==75.6.0
+pyinstaller==6.11.1

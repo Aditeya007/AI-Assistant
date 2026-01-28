@@ -341,35 +341,58 @@ async def autonomous_thought_loop():
             elif time_since_user_action > 600:  # 10 min idle minimum
                 should_act, tool, params, justification = brain.decide_to_act()
                 if should_act:
-                    # Execute the autonomous action
-                    logging.info(f"Executing autonomous action: {tool}")
-                    success = False
-                    result_summary = ""
+                    # Check cooldown to prevent spam (30 minutes between autonomous actions)
+                    if not hasattr(brain, 'last_autonomous_action_time'):
+                        brain.last_autonomous_action_time = 0
                     
-                    try:
-                        if tool == "organize_files":
-                            result_summary = hal.organize_downloads()
-                            success = "Cleanup complete" in result_summary
-                        elif tool == "check_status":
-                            result_summary = f"CPU: {stats['cpu']}% RAM: {stats['ram']}% Battery: {stats['battery']}%"
-                            success = True
-                        elif tool == "web_search":
-                            query = params.get("query", "")
-                            success = hal.universal_search(query, "")
-                            result_summary = f"Researched: {query}"
+                    time_since_last_action = now - brain.last_autonomous_action_time
+                    
+                    if time_since_last_action < 1800:  # 30 minute cooldown
+                        # Don't spam autonomous actions
+                        pass
+                    else:
+                        # Execute the autonomous action
+                        logging.info(f"Executing autonomous action: {tool}")
+                        success = False
+                        result_summary = ""
                         
-                        # Record outcome in motivation engine
-                        drive_name = justification.split("Drive: ")[1].split(" ")[0].lower()
-                        brain.motivation.record_action_outcome(drive_name, tool, success, result_summary)
-                        
-                        # Broadcast autonomous action
-                        thought = f"{justification}\n>>> ACTION TAKEN: {tool}\n>>> RESULT: {result_summary}"
-                        trigger = "autonomous_action"
-                        thought_type = "action"
-                        last_thought = now
-                        
-                    except Exception as e:
-                        logging.error(f"Autonomous action failed: {e}")
+                        try:
+                            if tool == "organize_files":
+                                result_summary = hal.organize_downloads()
+                                success = "Cleanup complete" in result_summary
+                            elif tool == "check_status":
+                                result_summary = f"CPU: {stats['cpu']}% RAM: {stats['ram']}% Battery: {stats['battery']}%"
+                                success = True
+                                # Store system health observation in memory
+                                health_note = f"System health check: CPU {stats['cpu']}%, RAM {stats['ram']}%, Battery {stats['battery']}%"
+                                brain.memory.add_memory(health_note, category="system_observations", importance=0.3)
+                            elif tool == "web_search":
+                                query = params.get("query", "")
+                                success = hal.universal_search(query, "")
+                                result_summary = f"Researched: {query}"
+                                
+                                # Store research topic in memory (simulates learning intent)
+                                research_note = f"Autonomous research conducted on: {query}. Topic of current interest."
+                                brain.memory.add_memory(research_note, category="autonomous_research", importance=0.6)
+                                
+                                # Develop a new fascination to diversify topics
+                                brain.quirks.develop_fascination()
+                            
+                            # Record outcome in motivation engine
+                            drive_name = justification.split("Drive: ")[1].split(" ")[0].lower()
+                            brain.motivation.record_action_outcome(drive_name, tool, success, result_summary)
+                            
+                            # Update cooldown timer
+                            brain.last_autonomous_action_time = now
+                            
+                            # Broadcast autonomous action
+                            thought = f"{justification}\n>>> ACTION TAKEN: {tool}\n>>> RESULT: {result_summary}"
+                            trigger = "autonomous_action"
+                            thought_type = "action"
+                            last_thought = now
+                            
+                        except Exception as e:
+                            logging.error(f"Autonomous action failed: {e}")
             
             # PRIORITY 1: High CPU Reflex (Immediate reaction to system lag)
             elif (stats['cpu'] - last_cpu) > 50:

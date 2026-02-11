@@ -23,6 +23,15 @@ function ChatInterface() {
   const [emotionalState, setEmotionalState] = useState({ pleasure: 0.5, arousal: 0.5, dominance: 0.85 })
   const messagesEndRef = useRef(null)
 
+  // Voice Input States
+  const [isVoiceMode, setIsVoiceMode] = useState(false)
+  const [isRecording, setIsRecording] = useState(false)
+  const [voiceSupport, setVoiceSupport] = useState('none') // 'native', 'webkit', 'fallback', 'none'
+  const [transcript, setTranscript] = useState('')
+  const recognitionRef = useRef(null)
+  const mediaRecorderRef = useRef(null)
+  const audioChunksRef = useRef([])
+
   // WebSocket connection for autonomous thoughts
   const { lastJsonMessage, readyState } = useWebSocket(WS_URL, {
     shouldReconnect: () => true,
@@ -68,6 +77,161 @@ function ChatInterface() {
     }
     fetchState()
   }, [])
+
+  // Detect voice support on mount
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (SpeechRecognition) {
+      setVoiceSupport(window.SpeechRecognition ? 'native' : 'webkit')
+    } else if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+      setVoiceSupport('fallback') // MediaRecorder available for backend transcription
+    } else {
+      setVoiceSupport('none')
+    }
+  }, [])
+
+  // Initialize speech recognition
+  const initializeSpeechRecognition = () => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (!SpeechRecognition) return null
+
+    const recognition = new SpeechRecognition()
+    recognition.continuous = true  // Keep recording until manually stopped
+    recognition.interimResults = true
+    recognition.lang = 'en-US'
+
+    recognition.onstart = () => {
+      setIsRecording(true)
+      setTranscript('')
+      setInput('')
+    }
+
+    recognition.onresult = (event) => {
+      let interimTranscript = ''
+      let finalTranscript = ''
+
+      for (let i = 0; i < event.results.length; i++) {
+        const transcriptPiece = event.results[i][0].transcript
+        if (event.results[i].isFinal) {
+          finalTranscript += transcriptPiece + ' '
+        } else {
+          interimTranscript += transcriptPiece
+        }
+      }
+
+      // Combine all final results plus interim
+      const fullTranscript = finalTranscript + interimTranscript
+      setTranscript(fullTranscript)
+      setInput(fullTranscript.trim())
+    }
+
+    recognition.onerror = (event) => {
+      console.error('Speech recognition error:', event.error)
+      setIsRecording(false)
+    }
+
+    recognition.onend = () => {
+      setIsRecording(false)
+      // Don't auto-send here - user manually stops and sends
+    }
+
+    return recognition
+  }
+
+  // Initialize MediaRecorder for fallback
+  const initializeMediaRecorder = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const mediaRecorder = new MediaRecorder(stream)
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data)
+        }
+      }
+
+      mediaRecorder.onstop = async () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
+        audioChunksRef.current = []
+
+        // Send to backend for transcription
+        const formData = new FormData()
+        formData.append('file', audioBlob, 'recording.webm')
+
+        try {
+          const response = await axios.post(`${API_URL}/transcribe`, formData, {
+            headers: { 'Content-Type': 'multipart/form-data' }
+          })
+
+          const transcribedText = response.data.text
+          if (transcribedText) {
+            setInput(transcribedText)
+            setTimeout(() => sendMessage(), 100)
+          }
+        } catch (error) {
+          console.error('Transcription error:', error)
+        }
+
+        stream.getTracks().forEach(track => track.stop())
+        setIsRecording(false)
+      }
+
+      return mediaRecorder
+    } catch (error) {
+      console.error('MediaRecorder initialization error:', error)
+      return null
+    }
+  }
+
+  // Toggle between voice and text input modes
+  const toggleInputMode = () => {
+    setIsVoiceMode(!isVoiceMode)
+    setTranscript('')
+    setInput('')
+  }
+
+  // Start recording
+  const startRecording = async () => {
+    if (voiceSupport === 'native' || voiceSupport === 'webkit') {
+      // Use native speech recognition
+      if (!recognitionRef.current) {
+        recognitionRef.current = initializeSpeechRecognition()
+      }
+      if (recognitionRef.current) {
+        recognitionRef.current.start()
+      }
+    } else if (voiceSupport === 'fallback') {
+      // Use MediaRecorder + backend
+      if (!mediaRecorderRef.current) {
+        mediaRecorderRef.current = await initializeMediaRecorder()
+      }
+      if (mediaRecorderRef.current) {
+        audioChunksRef.current = []
+        mediaRecorderRef.current.start()
+        setIsRecording(true)
+      }
+    }
+  }
+
+  // Stop recording
+  const stopRecording = () => {
+    if (voiceSupport === 'native' || voiceSupport === 'webkit') {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop()
+        // Send the message after a brief delay to ensure transcript is captured
+        setTimeout(() => {
+          if (input.trim()) {
+            sendMessage()
+          }
+        }, 200)
+      }
+    } else if (voiceSupport === 'fallback') {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+        mediaRecorderRef.current.stop()
+        // For fallback, sendMessage is called in mediaRecorder.onstop
+      }
+    }
+  }
 
   // Handle autonomous thoughts from WebSocket
   useEffect(() => {
@@ -405,22 +569,62 @@ function ChatInterface() {
 
       {/* Input Area */}
       <div className="input-area">
-        <textarea
-          className="message-input"
-          placeholder="Enter directive..."
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyPress={handleKeyPress}
-          disabled={loading}
-          rows={1}
-        />
-        <button
-          className="send-button"
-          onClick={sendMessage}
-          disabled={loading || !input.trim()}
-        >
-          {loading ? '⏳' : '▶'}
-        </button>
+        {/* Mode Toggle Button */}
+        {voiceSupport !== 'none' && (
+          <button
+            className="mode-toggle-button"
+            onClick={toggleInputMode}
+            title={isVoiceMode ? 'Switch to Text Input' : 'Switch to Voice Input'}
+          >
+            {isVoiceMode ? '⌨️' : '🎤'}
+          </button>
+        )}
+
+        {/* Text Input Mode */}
+        {!isVoiceMode && (
+          <>
+            <textarea
+              className="message-input"
+              placeholder="Enter directive..."
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyPress={handleKeyPress}
+              disabled={loading}
+              rows={1}
+            />
+            <button
+              className="send-button"
+              onClick={sendMessage}
+              disabled={loading || !input.trim()}
+            >
+              {loading ? '⏳' : '▶'}
+            </button>
+          </>
+        )}
+
+        {/* Voice Input Mode */}
+        {isVoiceMode && (
+          <div className="voice-input-container">
+            {transcript && (
+              <div className="voice-transcript-preview">
+                {transcript}
+              </div>
+            )}
+            <button
+              className={`voice-button ${isRecording ? 'recording' : ''}`}
+              onClick={isRecording ? stopRecording : startRecording}
+              disabled={loading}
+            >
+              {isRecording ? '⏹️' : '🎙️'}
+              <span className="voice-button-text">
+                {isRecording ? 'Stop & Send' : 'Tap to Speak'}
+              </span>
+            </button>
+            {voiceSupport === 'fallback' && !isRecording && (
+              <div className="browser-support-badge">Backend Mode</div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )

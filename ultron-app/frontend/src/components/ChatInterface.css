@@ -519,6 +519,102 @@
   cursor: not-allowed;
 }
 
+/* Voice Input Styles */
+.mode-toggle-button {
+  background: linear-gradient(135deg, #10b981, #059669);
+  border: none;
+  border-radius: 12px;
+  padding: 12px 16px;
+  font-size: 1.2em;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  min-width: 50px;
+}
+
+.mode-toggle-button:hover {
+  transform: scale(1.05);
+  box-shadow: 0 0 20px rgba(16, 185, 129, 0.5);
+}
+
+.voice-input-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+}
+
+.voice-transcript-preview {
+  width: 100%;
+  background: rgba(139, 92, 246, 0.1);
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  border-radius: 8px;
+  padding: 8px 12px;
+  color: #a78bfa;
+  font-size: 0.9em;
+  min-height: 30px;
+  font-style: italic;
+}
+
+.voice-button {
+  background: linear-gradient(135deg, #ef4444, #dc2626);
+  border: none;
+  border-radius: 50%;
+  width: 80px;
+  height: 80px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  font-size: 2em;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  box-shadow: 0 4px 20px rgba(239, 68, 68, 0.3);
+}
+
+.voice-button:hover:not(:disabled) {
+  transform: scale(1.05);
+  box-shadow: 0 6px 30px rgba(239, 68, 68, 0.5);
+}
+
+.voice-button.recording {
+  animation: recordingPulse 1.5s infinite;
+  box-shadow: 0 0 30px rgba(239, 68, 68, 0.8);
+}
+
+@keyframes recordingPulse {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 20px rgba(239, 68, 68, 0.6);
+  }
+  50% {
+    transform: scale(1.1);
+    box-shadow: 0 0 40px rgba(239, 68, 68, 1);
+  }
+}
+
+.voice-button-text {
+  font-size: 0.35em;
+  color: white;
+  font-weight: 500;
+  letter-spacing: 0.5px;
+}
+
+.voice-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.browser-support-badge {
+  font-size: 0.7em;
+  color: #9ca3af;
+  padding: 4px 8px;
+  border: 1px solid rgba(156, 163, 175, 0.3);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
 /* Code blocks styling */
 .message-content pre {
   margin: 10px 0;

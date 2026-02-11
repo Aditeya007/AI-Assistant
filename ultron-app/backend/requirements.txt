@@ -23,6 +23,8 @@ pyperclip==1.9.0
 # Voice System
 pyttsx3==2.98
 pywin32==308
+vosk==0.3.45
+python-multipart==0.0.6
 
 # Utilities
 python-dotenv==1.0.1

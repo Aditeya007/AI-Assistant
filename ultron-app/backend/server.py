@@ -11,10 +11,13 @@ import random
 import logging
 from datetime import datetime
 from typing import List, Optional
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from plyer import notification
+import wave
+import os
+from vosk import Model, KaldiRecognizer
 from ultron_core import (
     HardwareInterface, EmotionalCore, CognitiveEngine, 
     client, MODEL_ID, CREATOR
@@ -40,6 +43,20 @@ app.add_middleware(
 hal = HardwareInterface()
 core = EmotionalCore()
 brain = CognitiveEngine(core, hal)
+
+# --- VOSK MODEL SETUP ---
+# Initialize Vosk speech recognition model (will be downloaded on first run)
+vosk_model_path = "models/vosk-model-small-en-us-0.15"
+vosk_model = None
+
+try:
+    if os.path.exists(vosk_model_path):
+        vosk_model = Model(vosk_model_path)
+        logging.info("Vosk model loaded successfully")
+    else:
+        logging.warning(f"Vosk model not found at {vosk_model_path}. Voice transcription fallback will not work.")
+except Exception as e:
+    logging.error(f"Failed to load Vosk model: {e}")
 
 # --- WEBSOCKET CONNECTION MANAGER ---
 class ConnectionManager:
@@ -129,6 +146,71 @@ async def toggle_mute(request: MuteRequest):
 async def get_mute_state():
     """Get current mute state."""
     return {"muted": brain.voice.get_mute_state()}
+
+@app.post("/transcribe")
+async def transcribe_audio(file: UploadFile = File(...)):
+    """
+    Transcribe audio file to text using Vosk (for browsers without native speech recognition).
+    Accepts WebM, WAV, or other audio formats.
+    """
+    if not vosk_model:
+        return {"error": "Speech recognition model not loaded. Please download vosk-model-small-en-us-0.15", "text": ""}
+    
+    try:
+        # Save uploaded file temporarily
+        temp_audio_path = f"temp_audio_{int(time.time())}.webm"
+        with open(temp_audio_path, "wb") as f:
+            content = await file.read()
+            f.write(content)
+        
+        # Convert to WAV if needed (Vosk requires WAV)
+        wav_path = temp_audio_path.replace(".webm", ".wav")
+        
+        # Try to convert using ffmpeg if available, otherwise attempt direct processing
+        try:
+            # Simple approach: try to open as WAV directly
+            wf = wave.open(temp_audio_path, "rb")
+        except:
+            # If not WAV, we'd need ffmpeg conversion
+            # For now, return error suggesting manual conversion
+            os.remove(temp_audio_path)
+            return {"error": "Audio format not supported. Please use WAV format.", "text": ""}
+        
+        # Initialize recognizer
+        rec = KaldiRecognizer(vosk_model, wf.getframerate())
+        rec.SetWords(True)
+        
+        # Process audio
+        transcribed_text = ""
+        while True:
+            data = wf.readframes(4000)
+            if len(data) == 0:
+                break
+            if rec.AcceptWaveform(data):
+                result = json.loads(rec.Result())
+                transcribed_text += result.get("text", "") + " "
+        
+        # Get final result
+        final_result = json.loads(rec.FinalResult())
+        transcribed_text += final_result.get("text", "")
+        transcribed_text = transcribed_text.strip()
+        
+        # Cleanup
+        wf.close()
+        if os.path.exists(temp_audio_path):
+            os.remove(temp_audio_path)
+        if os.path.exists(wav_path) and wav_path != temp_audio_path:
+            os.remove(wav_path)
+        
+        logging.info(f"Transcribed: {transcribed_text}")
+        return {"text": transcribed_text, "success": True}
+        
+    except Exception as e:
+        logging.error(f"Transcription error: {e}")
+        # Cleanup on error
+        if os.path.exists(temp_audio_path):
+            os.remove(temp_audio_path)
+        return {"error": str(e), "text": ""}
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):

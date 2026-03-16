@@ -53,14 +53,30 @@ Remove-Item "vosk-model-small-en-us-0.15.zip"
 
 ### 5. Launch Chrome With Remote Debugging (For Browser Control)
 
-Close all existing Chrome windows first, then run:
-
+**Step 1 — Kill any existing Chrome processes:**
 ```powershell
-Start-Process "chrome.exe" "--remote-debugging-port=9222"
+taskkill /F /IM chrome.exe /T
 ```
 
+**Step 2 — Launch Chrome with a fresh debug profile:**
+```powershell
+Start-Process "chrome.exe" "--remote-debugging-port=9222 --user-data-dir=C:\temp\ultron_chrome"
+```
+
+**Step 3 — Verify the port is open:**
+```powershell
+Test-NetConnection -ComputerName localhost -Port 9222
+```
+Look for `TcpTestSucceeded : True`. Then verify Ultron can connect:
+```powershell
+Invoke-RestMethod -Uri "http://localhost:8000/browser/status" -Method GET
+```
+
+> [!IMPORTANT]
+> You **MUST** use `--user-data-dir` to avoid Chrome using a locked existing profile. Using the standard shortcut or double-clicking Chrome will NOT open the debug port.
+
 > [!TIP]
-> To make this permanent, right-click Chrome shortcut → Properties → add `--remote-debugging-port=9222` to the Target field.
+> **Planned improvement**: Auto-launch Chrome from the backend startup — then you'd never need to do this manually. Ask Antigravity to implement **Option C** when ready.
 
 ### 6. Start the Backend Server
 

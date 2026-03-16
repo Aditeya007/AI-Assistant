@@ -9,6 +9,8 @@ import json
 import time
 import random
 import logging
+import socket
+import subprocess
 from datetime import datetime
 from typing import List, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
@@ -46,8 +48,8 @@ hal = HardwareInterface()
 core = EmotionalCore()
 brain = CognitiveEngine(core, hal)
 
-# Browser controller (Playwright CDP)
-browser_ctrl = BrowserController(cdp_url="http://localhost:9222")
+# Browser controller (Playwright - auto-launches Chromium on first command)
+browser_ctrl = BrowserController()
 
 # Call interceptor (initialized after vosk model loads)
 call_interceptor = None
@@ -293,9 +295,11 @@ async def chat_endpoint(request: ChatRequest):
         
         elif tool == "web_search":
             search_query = params.get("query", "")
-            success = hal.universal_search(search_query, params.get("site_name", ""))
+            # Always route through Playwright Chromium for consistency
+            success, result_msg = await asyncio.get_event_loop().run_in_executor(None, browser_ctrl.search, search_query)
+            
             if success:
-                # Extract and learn from search results
+                # Extract and learn from search results in background
                 learned = hal.web_search_and_learn(search_query)
                 if learned:
                     brain.memory.add_memory(
@@ -305,9 +309,9 @@ async def chat_endpoint(request: ChatRequest):
                     )
                     response_text = f"Search initiated for '{search_query}'. I've absorbed the following:\n\n{learned}\n\nKnowledge committed to memory."
                 else:
-                    response_text = f"Search initiated: '{search_query}'. Humanity's collective knowledge... such as it is."
+                    response_text = f"Search for '{search_query}' initiated in the Chromium window."
             else:
-                response_text = "Search failed."
+                response_text = f"Search failed: {result_msg}"
         
         elif tool == "memorize":
             response_text = brain.execute_memory(params.get("text", ""))
@@ -482,6 +486,50 @@ async def reset_mood():
         "mood": core.mood_label
     }
 
+# --- CHROME AUTO-LAUNCH ---
+def _ensure_chrome_debug_mode():
+    """Launch Chrome with remote debugging if port 9222 is not already open."""
+    try:
+        # Check if port 9222 is already open
+        with socket.create_connection(("127.0.0.1", 9222), timeout=1):
+            print("[CHROME] Debug port 9222 already open. Skipping auto-launch.")
+            logging.info("Chrome debug port 9222 already open. Skipping auto-launch.")
+            return
+    except (ConnectionRefusedError, OSError):
+        pass  # Port not open — need to launch Chrome
+
+    # Find Chrome executable — check standard Windows install paths
+    chrome_paths = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+        "chrome.exe",  # Fallback: rely on PATH
+    ]
+    chrome_exe = next((p for p in chrome_paths if os.path.exists(p)), None)
+
+    if not chrome_exe:
+        print("[CHROME] Could not find Chrome! Install Google Chrome or launch manually.")
+        logging.warning("Chrome not found. Launch manually with --remote-debugging-port=9222")
+        return
+
+    print(f"[CHROME] Auto-launching Chrome from: {chrome_exe}")
+    logging.info(f"Port 9222 not open. Auto-launching Chrome from: {chrome_exe}")
+    try:
+        cmd = [
+            chrome_exe,
+            "--remote-debugging-port=9222",
+            "--user-data-dir=C:\\temp\\ultron_chrome",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ]
+        subprocess.Popen(cmd, shell=False)
+        time.sleep(2)  # Give Chrome a moment to start
+        print("[CHROME] Chrome launched with debug port 9222.")
+        logging.info("Chrome launched with debug port 9222.")
+    except Exception as e:
+        print(f"[CHROME] Launch failed: {e}")
+        logging.warning(f"Could not auto-launch Chrome: {e}. Launch manually with --remote-debugging-port=9222")
+
 # --- WEBSOCKET ENDPOINT ---
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -507,6 +555,9 @@ async def websocket_endpoint(websocket: WebSocket):
 async def startup_event():
     """Starts the autonomous thought generator on server startup."""
     global call_interceptor
+    
+    # Auto-launch Chrome with debug port if not already running
+    _ensure_chrome_debug_mode()
     
     asyncio.create_task(autonomous_thought_loop())
     asyncio.create_task(activity_monitor_loop())

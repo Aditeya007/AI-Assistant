@@ -2300,50 +2300,39 @@ class CognitiveEngine:
         
         AVAILABLE TOOLS:
         --- APP MANAGEMENT ---
-        - open_app(name): ONLY when user explicitly asks to open/launch an application
-        - close_app(name): ONLY when user asks to close/kill/quit an application
-          * EX: "close discord" -> {{"tool": "close_app", "params": {{"name": "discord"}}}}
-        - list_apps(): ONLY when user asks what apps are running / what's open
-        - switch_app(name): ONLY when user asks to switch to / bring up / focus an app
-          * EX: "switch to chrome" -> {{"tool": "switch_app", "params": {{"name": "chrome"}}}}
+        - open_app(name): Open an application
+        - close_app(name): Close an application
+        - list_apps(): List running apps
+        - switch_app(name): Switch to/focus an app
         
         --- SYSTEM CONTROLS ---
-        - set_volume(value): ONLY when user asks to change/set volume
-          * VALUE MUST BE 0-100 integer (e.g., "50%" should be 50, not 0.5)
-        - set_brightness(value): ONLY when user asks to change/set brightness
-          * VALUE MUST BE 0-100 integer (e.g., "80%" should be 80, not 0.8)
-          * EXAMPLES:
-            - "increase brightness to 80%" -> {{"tool": "set_brightness", "params": {{"value": 80}}}}
-            - "set brightness 50%" -> {{"tool": "set_brightness", "params": {{"value": 50}}}}
-            - "make it brighter" -> {{"tool": "set_brightness", "params": {{"value": 80}}}}
-            - "dim the screen" -> {{"tool": "set_brightness", "params": {{"value": 30}}}}
-        - organize_files(): ONLY when user asks to organize/clean downloads
-        - focus_mode(): ONLY when user asks to enable focus mode or close distractions
-        - read_clipboard(): ONLY when user asks about clipboard content
-        - check_status(): ONLY when user asks for system status/stats
-        - shutdown_pc(): ONLY when user asks to shutdown
+        - set_volume(value): Change volume (0-100)
+        - set_brightness(value): Change brightness (0-100)
+        - organize_files(): Clean downloads
+        - focus_mode(): Enable focus mode
+        - read_clipboard(): Check clipboard
+        - check_status(): Get system stats
+        - shutdown_pc(): Shutdown the PC
         
-        --- BROWSER CONTROL ---
-        - browser_navigate(url): ONLY when user asks to go to / open a specific URL in the browser
-          * EX: "go to youtube.com" -> {{"tool": "browser_navigate", "params": {{"url": "https://youtube.com"}}}}
-        - browser_search(query): ONLY when user asks to type/search something in the browser search bar
-          * EX: "search for cats on google" -> {{"tool": "browser_search", "params": {{"query": "cats"}}}}
-        - browser_scroll(direction, amount): ONLY when user asks to scroll the page
-          * direction: "up" or "down". amount: number of pixels (default 500)
-          * EX: "scroll down" -> {{"tool": "browser_scroll", "params": {{"direction": "down", "amount": 500}}}}
-        - browser_click(selector): ONLY when user asks to click a specific element on the page
-          * EX: "click the login button" -> {{"tool": "browser_click", "params": {{"selector": "text=Login"}}}}
-        - browser_type(text): ONLY when user asks to type text into the currently focused element
-          * EX: "type hello world" -> {{"tool": "browser_type", "params": {{"text": "hello world"}}}}
-        - browser_back(): ONLY when user asks to go back in the browser
-        - browser_forward(): ONLY when user asks to go forward in the browser
-        - browser_new_tab(): ONLY when user asks to open a new tab
-        - browser_close_tab(): ONLY when user asks to close the current tab
+        --- BROWSER (PLAYWRIGHT CHROMIUM) ---
+        - browser_navigate(url): Go to a specific URL (EX: "go to youtube.com")
+        - browser_search(query): Search anything on the web or specific sites (EX: "search cats", "search resident evil on youtube")
+        - browser_scroll(direction, amount): Scroll the page
+        - browser_click(selector): Click an element
+        - browser_type(text): Type text
+        - browser_back(): Previous page
+        - browser_forward(): Next page
+        - browser_new_tab(): New tab
+        - browser_close_tab(): Close current tab
         
-        --- MEMORY & SEARCH ---
-        - web_search(query, site_name): ONLY when user explicitly asks to search for something
-        - memorize(text): ONLY when user explicitly asks to remember/save a fact
-          * EX: "Remember that I like coffee" -> {{"tool": "memorize", "params": {{"text": "User likes coffee"}}}}
+        --- INTERNAL / MEMORY ---
+        - web_search(query): Background information gathering ONLY.
+        - memorize(text): Remember a fact
+        
+        - none: Greetings, questions, or conversation.
+        
+        IMPORTANT: Use BROWSER TOOLS for all "search", "find", "go to", or "open website" requests.
+        Response Format: {{ "tool": "tool_name", "params": {{ "key": value }} }}
         
         - none: Use for greetings, questions, conversations, or anything not matching above tools
         

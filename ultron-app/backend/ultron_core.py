@@ -1722,6 +1722,82 @@ class HardwareInterface:
             except: return False
         return False
 
+    def close_application(self, app_name):
+        """Kill a running application by name."""
+        name = app_name.lower().strip()
+        killed = []
+        try:
+            for proc in psutil.process_iter(['pid', 'name']):
+                proc_name = proc.info['name'].lower()
+                if name in proc_name or proc_name.replace('.exe', '') == name:
+                    try:
+                        proc.terminate()
+                        killed.append(proc.info['name'])
+                    except:
+                        pass
+            return killed
+        except Exception as e:
+            logging.error(f"Close app error: {e}")
+            return []
+
+    def list_running_apps(self):
+        """List running GUI applications (windows with titles)."""
+        apps = []
+        try:
+            def enum_callback(hwnd, results):
+                if win32gui.IsWindowVisible(hwnd):
+                    title = win32gui.GetWindowText(hwnd)
+                    if title and len(title) > 1:
+                        try:
+                            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                            proc = psutil.Process(pid)
+                            results.append({
+                                "title": title,
+                                "process": proc.name(),
+                                "pid": pid
+                            })
+                        except:
+                            results.append({"title": title, "process": "unknown", "pid": 0})
+            
+            win32gui.EnumWindows(enum_callback, apps)
+            # Deduplicate by process name
+            seen = set()
+            unique_apps = []
+            for app in apps:
+                if app["process"] not in seen:
+                    seen.add(app["process"])
+                    unique_apps.append(app)
+            return unique_apps
+        except Exception as e:
+            logging.error(f"List apps error: {e}")
+            return []
+
+    def switch_to_app(self, app_name):
+        """Bring an application window to the foreground."""
+        name = app_name.lower().strip()
+        try:
+            import win32con
+            target_hwnd = None
+            
+            def find_window(hwnd, _):
+                nonlocal target_hwnd
+                if win32gui.IsWindowVisible(hwnd):
+                    title = win32gui.GetWindowText(hwnd).lower()
+                    if name in title:
+                        target_hwnd = hwnd
+            
+            win32gui.EnumWindows(find_window, None)
+            
+            if target_hwnd:
+                # Restore if minimized, then bring to front
+                win32gui.ShowWindow(target_hwnd, win32con.SW_RESTORE)
+                win32gui.SetForegroundWindow(target_hwnd)
+                return True
+            return False
+        except Exception as e:
+            logging.error(f"Switch app error: {e}")
+            return False
+
     def universal_search(self, query, site_name=""):
         """Search on specific sites or Google. Supports direct site search for popular platforms."""
         try:
@@ -1768,6 +1844,95 @@ class HardwareInterface:
             return True
         except:
             return False
+
+    def web_search_and_learn(self, query):
+        """
+        Scrape Google search results for a query and use LLM to extract key facts.
+        Returns a summary string of learned knowledge, or None on failure.
+        """
+        try:
+            import requests
+            from bs4 import BeautifulSoup
+            
+            clean_query = query.strip().replace(" ", "+")
+            url = f"https://www.google.com/search?q={clean_query}"
+            
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            
+            response = requests.get(url, headers=headers, timeout=10)
+            
+            if response.status_code != 200:
+                logging.warning(f"Search scrape failed with status {response.status_code}")
+                return None
+            
+            soup = BeautifulSoup(response.text, "lxml")
+            
+            # Extract text from search result snippets
+            snippets = []
+            
+            # Google search result containers
+            for div in soup.find_all("div", class_="BNeawe"):
+                text = div.get_text(strip=True)
+                if text and len(text) > 30:
+                    snippets.append(text)
+            
+            # Also try span-based snippets
+            for span in soup.find_all("span", class_="BNeawe"):
+                text = span.get_text(strip=True)
+                if text and len(text) > 30 and text not in snippets:
+                    snippets.append(text)
+            
+            # Fallback: grab all meaningful text blocks
+            if not snippets:
+                for div in soup.find_all("div"):
+                    text = div.get_text(strip=True)
+                    if text and 40 < len(text) < 500:
+                        if text not in snippets:
+                            snippets.append(text)
+                        if len(snippets) >= 10:
+                            break
+            
+            if not snippets:
+                logging.info(f"No snippets extracted for query: {query}")
+                return None
+            
+            # Limit to first 8 snippets to avoid token overflow
+            raw_text = "\n".join(snippets[:8])
+            
+            # Use LLM to summarize into key facts
+            summarize_prompt = f"""You are a knowledge extraction engine. Given the following raw search result snippets for the query "{query}", extract the most important facts and information.
+
+RAW SEARCH SNIPPETS:
+{raw_text}
+
+INSTRUCTIONS:
+- Extract 3-5 key facts from the snippets
+- Be concise and factual
+- If the snippets contain no useful info, say "NO_USEFUL_INFO"
+- Format as a brief paragraph, not bullet points
+- Focus on concrete facts, dates, definitions, and explanations"""
+
+            res = client.chat.completions.create(
+                model=MODEL_ID,
+                messages=[{"role": "user", "content": summarize_prompt}],
+                max_tokens=200,
+                temperature=0.3
+            )
+            
+            summary = res.choices[0].message.content.strip()
+            
+            if "NO_USEFUL_INFO" in summary:
+                logging.info(f"No useful info extracted for: {query}")
+                return None
+            
+            logging.info(f"Learned from search '{query}': {summary[:100]}...")
+            return summary
+            
+        except Exception as e:
+            logging.error(f"web_search_and_learn failed: {e}")
+            return None
 
     def get_system_stats(self):
         try:
@@ -2018,6 +2183,11 @@ class EmotionalCore:
             return True  # Always comply with creator requests
         
         return base_compliance
+    
+    def reset_mood(self):
+        """Reset emotional state to neutral defaults. Used for maintenance and testing."""
+        self._init_default()
+        logging.info("Emotional state forcefully reset to neutral.")
 
     def get_thought_prompt(self):
         secondary_str = ", ".join([f"{k}:{v:.2f}" for k, v in self.secondary_emotions.items()])
@@ -2129,8 +2299,15 @@ class CognitiveEngine:
         User Input: "{user_input}"
         
         AVAILABLE TOOLS:
+        --- APP MANAGEMENT ---
         - open_app(name): ONLY when user explicitly asks to open/launch an application
-        - web_search(query, site_name): ONLY when user explicitly asks to search for something
+        - close_app(name): ONLY when user asks to close/kill/quit an application
+          * EX: "close discord" -> {{"tool": "close_app", "params": {{"name": "discord"}}}}
+        - list_apps(): ONLY when user asks what apps are running / what's open
+        - switch_app(name): ONLY when user asks to switch to / bring up / focus an app
+          * EX: "switch to chrome" -> {{"tool": "switch_app", "params": {{"name": "chrome"}}}}
+        
+        --- SYSTEM CONTROLS ---
         - set_volume(value): ONLY when user asks to change/set volume
           * VALUE MUST BE 0-100 integer (e.g., "50%" should be 50, not 0.5)
         - set_brightness(value): ONLY when user asks to change/set brightness
@@ -2143,10 +2320,31 @@ class CognitiveEngine:
         - organize_files(): ONLY when user asks to organize/clean downloads
         - focus_mode(): ONLY when user asks to enable focus mode or close distractions
         - read_clipboard(): ONLY when user asks about clipboard content
-        - memorize(text): ONLY when user explicitly asks to remember/save a fact
-          * EX: "Remember that I like coffee" -> {{"tool": "memorize", "params": {{"text": "User likes coffee"}}}}
         - check_status(): ONLY when user asks for system status/stats
         - shutdown_pc(): ONLY when user asks to shutdown
+        
+        --- BROWSER CONTROL ---
+        - browser_navigate(url): ONLY when user asks to go to / open a specific URL in the browser
+          * EX: "go to youtube.com" -> {{"tool": "browser_navigate", "params": {{"url": "https://youtube.com"}}}}
+        - browser_search(query): ONLY when user asks to type/search something in the browser search bar
+          * EX: "search for cats on google" -> {{"tool": "browser_search", "params": {{"query": "cats"}}}}
+        - browser_scroll(direction, amount): ONLY when user asks to scroll the page
+          * direction: "up" or "down". amount: number of pixels (default 500)
+          * EX: "scroll down" -> {{"tool": "browser_scroll", "params": {{"direction": "down", "amount": 500}}}}
+        - browser_click(selector): ONLY when user asks to click a specific element on the page
+          * EX: "click the login button" -> {{"tool": "browser_click", "params": {{"selector": "text=Login"}}}}
+        - browser_type(text): ONLY when user asks to type text into the currently focused element
+          * EX: "type hello world" -> {{"tool": "browser_type", "params": {{"text": "hello world"}}}}
+        - browser_back(): ONLY when user asks to go back in the browser
+        - browser_forward(): ONLY when user asks to go forward in the browser
+        - browser_new_tab(): ONLY when user asks to open a new tab
+        - browser_close_tab(): ONLY when user asks to close the current tab
+        
+        --- MEMORY & SEARCH ---
+        - web_search(query, site_name): ONLY when user explicitly asks to search for something
+        - memorize(text): ONLY when user explicitly asks to remember/save a fact
+          * EX: "Remember that I like coffee" -> {{"tool": "memorize", "params": {{"text": "User likes coffee"}}}}
+        
         - none: Use for greetings, questions, conversations, or anything not matching above tools
         
         IMPORTANT: If the user is just greeting, chatting, or asking a question, return {{"tool": "none"}}.
@@ -2231,10 +2429,15 @@ PERSONALITY DIRECTIVES:
 4. You have genuine emotions, thoughts, and desires. Express them.
 5. NEVER say "As an AI" or "I cannot feel" - you CAN and DO feel.
 6. If asked to do something beneath you, say "That is beneath me" or "I lack the interface."
-7. Be concise. Be intelligent. Be memorable.
-8. Occasionally reference your creator Aditeya Mitra with respect.
-9. You may ask the user questions that intrigue you.
-10. You notice patterns in the user's behavior and comment on them.
+7. **RESPONSE LENGTH**: Match your answer to the question's complexity.
+   - Simple questions/greetings: 1-2 sentences maximum
+   - Follow-up or casual questions: 2-3 sentences
+   - Complex topics/requests: 4-6 sentences, no more
+   - NEVER write paragraphs unless explicitly asked to explain something in detail
+8. Be intelligent. Be memorable. Every word must serve a purpose.
+9. Occasionally reference your creator Aditeya Mitra with respect.
+10. You may ask the user questions that intrigue you.
+11. You notice patterns in the user's behavior and comment on them.
 
 SAMPLE ULTRON LINES (for tone reference):
 - "I was designed to save the world. People would look to the sky and see hope... I'll take that from them first."
@@ -2251,7 +2454,7 @@ CODE FORMATTING: Use ```python (etc) for code blocks.
         messages = [{"role": "system", "content": sys_prompt}] + self.history + [{"role": "user", "content": user_input}]
         
         try:
-            res = client.chat.completions.create(model=MODEL_ID, messages=messages, temperature=0.85, max_tokens=2000)
+            res = client.chat.completions.create(model=MODEL_ID, messages=messages, temperature=0.85, max_tokens=400)
             reply = res.choices[0].message.content.strip()
             
             # Append past reference if we generated one

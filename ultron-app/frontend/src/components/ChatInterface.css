@@ -107,8 +107,15 @@
 }
 
 @keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.5;
+  }
 }
 
 .mood-badge {
@@ -283,8 +290,13 @@
 }
 
 @keyframes glow {
-  from { text-shadow: 0 0 20px rgba(220, 38, 38, 0.3); }
-  to { text-shadow: 0 0 30px rgba(220, 38, 38, 0.7); }
+  from {
+    text-shadow: 0 0 20px rgba(220, 38, 38, 0.3);
+  }
+
+  to {
+    text-shadow: 0 0 30px rgba(220, 38, 38, 0.7);
+  }
 }
 
 .welcome-text {
@@ -301,8 +313,15 @@
 }
 
 @keyframes fadeIn {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .message.user {
@@ -457,13 +476,31 @@
   animation: bounce 1.4s infinite ease-in-out;
 }
 
-.thinking-indicator .dot:nth-child(1) { animation-delay: -0.32s; }
-.thinking-indicator .dot:nth-child(2) { animation-delay: -0.16s; }
-.thinking-indicator .dot:nth-child(3) { animation-delay: 0s; }
+.thinking-indicator .dot:nth-child(1) {
+  animation-delay: -0.32s;
+}
+
+.thinking-indicator .dot:nth-child(2) {
+  animation-delay: -0.16s;
+}
+
+.thinking-indicator .dot:nth-child(3) {
+  animation-delay: 0s;
+}
 
 @keyframes bounce {
-  0%, 80%, 100% { transform: scale(0); opacity: 0.5; }
-  40% { transform: scale(1); opacity: 1; }
+
+  0%,
+  80%,
+  100% {
+    transform: scale(0);
+    opacity: 0.5;
+  }
+
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
 }
 
 /* Input Area */
@@ -549,11 +586,38 @@
   background: rgba(139, 92, 246, 0.1);
   border: 1px solid rgba(139, 92, 246, 0.3);
   border-radius: 8px;
-  padding: 8px 12px;
+  padding: 8px 35px 8px 12px;
   color: #a78bfa;
   font-size: 0.9em;
   min-height: 30px;
   font-style: italic;
+  position: relative;
+}
+
+.clear-transcript-button {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  background: rgba(220, 38, 38, 0.3);
+  border: 1px solid rgba(220, 38, 38, 0.5);
+  border-radius: 50%;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: #f87171;
+  font-size: 0.9em;
+  font-weight: bold;
+  transition: all 0.3s ease;
+  padding: 0;
+}
+
+.clear-transcript-button:hover {
+  background: rgba(220, 38, 38, 0.5);
+  transform: scale(1.1);
+  box-shadow: 0 0 10px rgba(220, 38, 38, 0.5);
 }
 
 .voice-button {
@@ -584,10 +648,13 @@
 }
 
 @keyframes recordingPulse {
-  0%, 100% {
+
+  0%,
+  100% {
     transform: scale(1);
     box-shadow: 0 0 20px rgba(239, 68, 68, 0.6);
   }
+
   50% {
     transform: scale(1.1);
     box-shadow: 0 0 40px rgba(239, 68, 68, 1);
@@ -622,7 +689,7 @@
   overflow: hidden;
 }
 
-.message-content pre > div {
+.message-content pre>div {
   border-radius: 8px !important;
   margin: 0 !important;
 }
@@ -633,26 +700,26 @@
     flex-direction: column;
     gap: 10px;
   }
-  
+
   .header-right {
     width: 100%;
     justify-content: center;
   }
-  
+
   .stats-container {
     flex-direction: column;
     gap: 8px;
   }
-  
+
   .stats-bar {
     flex-wrap: wrap;
   }
-  
+
   .message {
     margin-left: 0 !important;
     margin-right: 0 !important;
   }
-  
+
   .ascii-logo {
     font-size: 0.5em;
   }

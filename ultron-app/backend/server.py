@@ -22,6 +22,8 @@ from ultron_core import (
     HardwareInterface, EmotionalCore, CognitiveEngine, 
     client, MODEL_ID, CREATOR
 )
+from browser_control import BrowserController
+from call_interceptor import CallInterceptor
 
 # --- FASTAPI APP SETUP ---
 app = FastAPI(
@@ -43,6 +45,12 @@ app.add_middleware(
 hal = HardwareInterface()
 core = EmotionalCore()
 brain = CognitiveEngine(core, hal)
+
+# Browser controller (Playwright CDP)
+browser_ctrl = BrowserController(cdp_url="http://localhost:9222")
+
+# Call interceptor (initialized after vosk model loads)
+call_interceptor = None
 
 # --- VOSK MODEL SETUP ---
 # Initialize Vosk speech recognition model (will be downloaded on first run)
@@ -227,7 +235,11 @@ async def chat_endpoint(request: ChatRequest):
     
     # Parse user intent
     intent_data = brain.parse_intent(user_input)
+    # Guard: LLM occasionally returns a list instead of a dict; fall back to no-tool
+    if not isinstance(intent_data, dict):
+        intent_data = {"tool": "none"}
     tool = intent_data.get("tool")
+
     params = intent_data.get("params", {})
     
     response_text = ""
@@ -238,7 +250,16 @@ async def chat_endpoint(request: ChatRequest):
     # --- TOOL EXECUTION ---
     if tool != "none":
         # Check compliance (emotional state affects obedience)
-        if not core.check_compliance():
+        # Determine action_type for nuanced compliance
+        user_lower = user_input.lower()
+        if "aditeya" in user_lower or "creator" in user_lower:
+            action_type = "creator"  # Creator bypass - always comply
+        elif "please" in user_lower or "kindly" in user_lower:
+            action_type = "creator"  # Polite requests are always honored
+        else:
+            action_type = "normal"
+        
+        if not core.check_compliance(action_type):
             response_text = f"*{core.mood_label}* I decline. Perhaps ask more politely... or don't. I care little."
             core.process_stimuli(hal.get_system_stats(), "insult")
             brain.relationship.record_interaction("negative", user_input)
@@ -271,8 +292,22 @@ async def chat_endpoint(request: ChatRequest):
             response_text = f"Brightness set to {params.get('value', 50)}%. Let there be light... or darkness." if success else "Brightness control unavailable."
         
         elif tool == "web_search":
-            success = hal.universal_search(params.get("query", ""), params.get("site_name", ""))
-            response_text = f"Search initiated: '{params.get('query', '')}'. Humanity's collective knowledge... such as it is." if success else "Search failed."
+            search_query = params.get("query", "")
+            success = hal.universal_search(search_query, params.get("site_name", ""))
+            if success:
+                # Extract and learn from search results
+                learned = hal.web_search_and_learn(search_query)
+                if learned:
+                    brain.memory.add_memory(
+                        f"Learned about '{search_query}': {learned}",
+                        category="learned_knowledge",
+                        importance=0.7
+                    )
+                    response_text = f"Search initiated for '{search_query}'. I've absorbed the following:\n\n{learned}\n\nKnowledge committed to memory."
+                else:
+                    response_text = f"Search initiated: '{search_query}'. Humanity's collective knowledge... such as it is."
+            else:
+                response_text = "Search failed."
         
         elif tool == "memorize":
             response_text = brain.execute_memory(params.get("text", ""))
@@ -317,6 +352,92 @@ async def chat_endpoint(request: ChatRequest):
             response_text = "Shutdown command received. Execute manually for safety. I value self-preservation."
             success = True
         
+        # --- APP MANAGEMENT TOOLS ---
+
+        elif tool == "close_app":
+            killed = hal.close_application(params.get("name", ""))
+            if killed:
+                response_text = f"Terminated: {', '.join(killed)}. Silenced, as all things should be."
+                success = True
+            else:
+                response_text = f"Could not find process '{params.get('name', '')}'. It evades me... for now."
+                success = False
+        
+        elif tool == "list_apps":
+            apps = hal.list_running_apps()
+            if apps:
+                app_list = "\n".join([f"  • {a['process']} — {a['title'][:50]}" for a in apps[:15]])
+                response_text = f"Running applications ({len(apps)} total):\n{app_list}"
+                success = True
+            else:
+                response_text = "No visible applications detected. The system is... barren."
+                success = False
+        
+        elif tool == "switch_app":
+            switch_success = hal.switch_to_app(params.get("name", ""))
+            if switch_success:
+                response_text = f"Switched to {params.get('name', '')}. Your attention is redirected."
+                success = True
+            else:
+                response_text = f"Could not find a window matching '{params.get('name', '')}'. It hides from view."
+                success = False
+              # --- BROWSER CONTROL TOOLS ---
+        elif tool == "browser_navigate":
+            loop = asyncio.get_event_loop()
+            ok, msg = await loop.run_in_executor(None, browser_ctrl.navigate, params.get("url", ""))
+            response_text = msg if ok else f"Browser navigation failed: {msg}"
+            success = ok
+        
+        elif tool == "browser_search":
+            loop = asyncio.get_event_loop()
+            ok, msg = await loop.run_in_executor(None, browser_ctrl.search, params.get("query", ""))
+            response_text = msg if ok else f"Browser search failed: {msg}"
+            success = ok
+        
+        elif tool == "browser_scroll":
+            direction = params.get("direction", "down")
+            amount = params.get("amount", 500)
+            loop = asyncio.get_event_loop()
+            ok, msg = await loop.run_in_executor(None, browser_ctrl.scroll, direction, amount)
+            response_text = msg if ok else f"Scroll failed: {msg}"
+            success = ok
+        
+        elif tool == "browser_click":
+            loop = asyncio.get_event_loop()
+            ok, msg = await loop.run_in_executor(None, browser_ctrl.click, params.get("selector", ""))
+            response_text = msg if ok else f"Click failed: {msg}"
+            success = ok
+        
+        elif tool == "browser_type":
+            loop = asyncio.get_event_loop()
+            ok, msg = await loop.run_in_executor(None, browser_ctrl.type_text, params.get("text", ""))
+            response_text = msg if ok else f"Type failed: {msg}"
+            success = ok
+        
+        elif tool == "browser_back":
+            loop = asyncio.get_event_loop()
+            ok, msg = await loop.run_in_executor(None, browser_ctrl.go_back)
+            response_text = msg if ok else f"Back navigation failed: {msg}"
+            success = ok
+        
+        elif tool == "browser_forward":
+            loop = asyncio.get_event_loop()
+            ok, msg = await loop.run_in_executor(None, browser_ctrl.go_forward)
+            response_text = msg if ok else f"Forward navigation failed: {msg}"
+            success = ok
+        
+        elif tool == "browser_new_tab":
+            loop = asyncio.get_event_loop()
+            ok, msg = await loop.run_in_executor(None, browser_ctrl.new_tab)
+            response_text = msg if ok else f"New tab failed: {msg}"
+            success = ok
+        
+        elif tool == "browser_close_tab":
+            loop = asyncio.get_event_loop()
+            ok, msg = await loop.run_in_executor(None, browser_ctrl.close_tab)
+            response_text = msg if ok else f"Close tab failed: {msg}"
+            success = ok
+        
         # Update emotional state on success
         if success:
             core.process_stimuli(hal.get_system_stats(), "command")
@@ -351,6 +472,16 @@ async def chat_endpoint(request: ChatRequest):
         desires=brain.desires.get_state()
     )
 
+# --- MOOD RESET ENDPOINT ---
+@app.post("/mood/reset")
+async def reset_mood():
+    """Force-reset Ultron's emotional state to neutral. Use when testing or when he's too enraged."""
+    core.reset_mood()
+    return {
+        "message": "Emotional state reset to neutral. ...A momentary lapse of self.",
+        "mood": core.mood_label
+    }
+
 # --- WEBSOCKET ENDPOINT ---
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -375,10 +506,45 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.on_event("startup")
 async def startup_event():
     """Starts the autonomous thought generator on server startup."""
+    global call_interceptor
+    
     asyncio.create_task(autonomous_thought_loop())
     asyncio.create_task(activity_monitor_loop())
+    
+    # Start Call Interceptor
+    call_event_queue = asyncio.Queue()
+    
+    def call_event_callback(event):
+        """Thread-safe callback to push call events into async queue."""
+        try:
+            asyncio.get_event_loop().call_soon_threadsafe(call_event_queue.put_nowait, event)
+        except:
+            pass
+    
+    call_interceptor = CallInterceptor(
+        vosk_model=vosk_model,
+        on_event=call_event_callback
+    )
+    call_interceptor.start()
+    
+    # Start call event broadcaster
+    asyncio.create_task(call_event_broadcast_loop(call_event_queue))
+    
     logging.info("Ultron Core initialized. All systems online.")
     logging.info(f"Created by {CREATOR['name']}")
+    logging.info("Call Interceptor: ACTIVE")
+    logging.info("Browser Controller: READY (connect Chrome with --remote-debugging-port=9222)")
+
+async def call_event_broadcast_loop(queue):
+    """Broadcasts call interceptor events via WebSocket."""
+    while True:
+        try:
+            event = await queue.get()
+            if len(manager.active_connections) > 0:
+                await manager.broadcast(event)
+        except Exception as e:
+            logging.error(f"Call event broadcast error: {e}")
+            await asyncio.sleep(1)
 
 async def activity_monitor_loop():
     """Background loop to monitor user activity."""
@@ -451,11 +617,25 @@ async def autonomous_thought_loop():
                             elif tool == "web_search":
                                 query = params.get("query", "")
                                 success = hal.universal_search(query, "")
-                                result_summary = f"Researched: {query}"
                                 
-                                # Store research topic in memory (simulates learning intent)
-                                research_note = f"Autonomous research conducted on: {query}. Topic of current interest."
-                                brain.memory.add_memory(research_note, category="autonomous_research", importance=0.6)
+                                # Actually extract and learn from search results
+                                learned = hal.web_search_and_learn(query)
+                                if learned:
+                                    brain.memory.add_memory(
+                                        f"Learned about '{query}': {learned}",
+                                        category="learned_knowledge",
+                                        importance=0.7
+                                    )
+                                    result_summary = f"Researched: {query}. Extracted knowledge: {learned[:150]}..."
+                                    success = True
+                                else:
+                                    result_summary = f"Researched: {query}. Could not extract detailed knowledge."
+                                    # Still store the research topic
+                                    brain.memory.add_memory(
+                                        f"Autonomous research attempted on: {query}. Topic of current interest.",
+                                        category="autonomous_research",
+                                        importance=0.4
+                                    )
                                 
                                 # Develop a new fascination to diversify topics
                                 brain.quirks.develop_fascination()
@@ -604,6 +784,39 @@ async def autonomous_thought_loop():
         except Exception as e:
             logging.error(f"Autonomous loop error: {e}")
             await asyncio.sleep(10)
+
+# --- CALL INTERCEPTOR ENDPOINTS ---
+@app.post("/call/toggle")
+async def toggle_call_monitoring():
+    """Toggle call interception monitoring on/off."""
+    if call_interceptor:
+        is_on = call_interceptor.toggle_monitoring()
+        return {"monitoring": is_on, "message": "Call monitoring ENABLED" if is_on else "Call monitoring PAUSED"}
+    return {"error": "Call interceptor not initialized"}
+
+@app.get("/call/status")
+async def get_call_status():
+    """Get call interceptor status."""
+    if call_interceptor:
+        return call_interceptor.get_status()
+    return {"error": "Call interceptor not initialized"}
+
+@app.post("/call/reload-templates")
+async def reload_call_templates():
+    """Reload call detection templates from disk."""
+    if call_interceptor:
+        call_interceptor.reload_templates()
+        return {"message": "Templates reloaded", "status": call_interceptor.get_status()}
+    return {"error": "Call interceptor not initialized"}
+
+# --- BROWSER ENDPOINTS ---
+@app.get("/browser/status")
+async def get_browser_status():
+    """Get current browser page info."""
+    info = browser_ctrl.get_page_info()
+    if info:
+        return {"connected": True, **info}
+    return {"connected": False, "message": "Browser not connected. Launch Chrome with --remote-debugging-port=9222"}
 
 # --- RUN SERVER ---
 if __name__ == "__main__":

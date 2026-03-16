@@ -233,6 +233,31 @@ function ChatInterface() {
     }
   }
 
+  // Clear transcript when voice recognition picks up something wrong
+  const clearTranscript = () => {
+    setTranscript('')
+    setInput('')
+    // If currently recording, stop and restart
+    if (isRecording) {
+      if (voiceSupport === 'native' || voiceSupport === 'webkit') {
+        if (recognitionRef.current) {
+          recognitionRef.current.stop()
+          // Brief delay before restarting
+          setTimeout(() => {
+            if (recognitionRef.current) {
+              recognitionRef.current.start()
+            }
+          }, 300)
+        }
+      } else if (voiceSupport === 'fallback') {
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+          mediaRecorderRef.current.stop()
+          // Restart will happen through the UI when user clicks record again
+        }
+      }
+    }
+  }
+
   // Handle autonomous thoughts from WebSocket
   useEffect(() => {
     if (lastJsonMessage && lastJsonMessage.type !== 'pong') {
@@ -608,6 +633,13 @@ function ChatInterface() {
             {transcript && (
               <div className="voice-transcript-preview">
                 {transcript}
+                <button
+                  className="clear-transcript-button"
+                  onClick={clearTranscript}
+                  title="Clear incorrect transcription"
+                >
+                  ✕
+                </button>
               </div>
             )}
             <button

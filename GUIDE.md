@@ -1,448 +1,358 @@
-# Ultron AI Assistant Setup and Feature Testing Guide
+# Ultron Frontend User Guide
 
-This guide walks you through:
-- Full setup on Windows
-- Running backend and frontend
-- Testing every implemented feature category
-- Validating expected outputs
-- Troubleshooting common failures
+This guide is for end users testing Ultron from the frontend chat interface only.
 
-## 1. What You Need
+No API calls, no curl commands, no backend smoke tests.
 
-- Windows 10/11
-- Python 3.11
-- Node.js 18+
-- Working microphone and speaker (for voice features)
-- Groq API key
+## 1. Start Ultron UI
 
-## 2. Project Layout
+1. Launch the backend and frontend as your project normally does.
+2. Open the frontend app.
+3. Wait until the chat panel is ready.
+4. Type in chat (or use voice mode) and test features using the prompts below.
 
-- Backend API and core logic: [ultron-app/backend](ultron-app/backend)
-- Frontend UI: [ultron-app/frontend](ultron-app/frontend)
-- Python dependencies: [requirements.txt](requirements.txt)
-- Existing test notes: [testing_guide.md](testing_guide.md)
-- Persistent state files (mood, memory, relationship, etc.): root `ultron_*.json`
+## 2. How To Use This Guide
 
-## 3. Initial Setup
+For every feature:
+- Type one of the example prompts in chat.
+- Watch what happens in the UI and on your desktop/browser.
+- Compare with the expected result.
 
-### 3.1 Python environment and dependencies
+If one prompt fails, try a simpler phrase from the same section.
 
-Run from workspace root:
+## 3. Core Chat and Personality Features
 
-```powershell
-cd C:\DESKTOP_FILES\ultron\AI-Assistant-
-python -m venv venv
-.\venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-```
+### 3.1 Normal conversation
 
-### 3.2 Install Playwright browser runtime
-
-```powershell
-playwright install chromium
-```
-
-### 3.3 Configure .env
-
-Create or edit `.env` in root and include at least:
-
-```env
-GROQ_API_KEY=your_groq_api_key_here
-```
-
-### 3.4 Ensure Vosk model exists
-
-Expected model directory:
-- [ultron-app/backend/models/vosk-model-small-en-us-0.15](ultron-app/backend/models/vosk-model-small-en-us-0.15)
-
-If missing, download/extract the model into that folder path.
-
-## 4. Start Services
-
-### 4.1 Start backend
-
-```powershell
-cd C:\DESKTOP_FILES\ultron\AI-Assistant-\ultron-app\backend
-python -m uvicorn server:app --reload --port 8000
-```
-
-### 4.2 Start frontend (new terminal)
-
-```powershell
-cd C:\DESKTOP_FILES\ultron\AI-Assistant-\ultron-app\frontend
-npm install
-npm run dev
-```
-
-Frontend default: `http://localhost:5173`
-Backend default: `http://localhost:8000`
-
-## 5. Quick Smoke Test
-
-Run these with backend up:
-
-```powershell
-Invoke-RestMethod http://localhost:8000/
-Invoke-RestMethod http://localhost:8000/status
-Invoke-RestMethod http://localhost:8000/state
-Invoke-RestMethod http://localhost:8000/browser/status
-Invoke-RestMethod http://localhost:8000/call/status
-```
+Try:
+- "hello"
+- "how are you feeling today"
+- "what are you thinking about"
 
 Expected:
-- `/` returns core online/version/creator info
-- `/status` includes stats + mood
-- `/state` returns full subsystem state
-- `/browser/status` indicates connected true/false
-- `/call/status` indicates monitoring state
+- Ultron replies in character.
+- Mood/state indicators can change after interactions.
 
-## 6. API Endpoint Tutorial and Tests
+### 3.2 Mood and emotional response shifts
 
-### 6.1 `GET /`
+Try positive input:
+- "great job"
+- "thanks, that was helpful"
 
-```powershell
-Invoke-RestMethod http://localhost:8000/
-```
+Try negative input:
+- "that was useless"
+- "you are wrong"
 
-Confirms server identity/version.
+Expected:
+- Tone and mood label can shift.
+- Relationship-style behavior may adjust over time.
 
-### 6.2 `GET /status`
+### 3.3 Memory in conversation
 
-```powershell
-Invoke-RestMethod http://localhost:8000/status
-```
+Try:
+- "remember that my favorite game is Resident Evil"
+- "remember i like dark themes"
+- "what do you remember about me"
 
-Check fields:
-- `stats.cpu`, `stats.ram`, `stats.battery`
-- `mood`
-- `compliance`
+Expected:
+- Ultron stores explicit memory requests.
+- Later prompts may include remembered facts.
 
-### 6.3 `GET /state`
+## 4. Browser Control Features (From Chat)
 
-```powershell
-Invoke-RestMethod http://localhost:8000/state
-```
+Use natural language commands directly in the chat.
 
-Confirms combined emotional, relationship, desire, temporal, quirks, reflection, proactive, motivation states.
+### 4.1 Open websites
 
-### 6.4 `POST /mute` and `GET /mute`
+Try:
+- "open youtube.com"
+- "open github.com"
+- "go to wikipedia.org"
 
-```powershell
-Invoke-RestMethod -Uri http://localhost:8000/mute -Method POST -ContentType "application/json" -Body '{"muted": true}'
-Invoke-RestMethod http://localhost:8000/mute
-Invoke-RestMethod -Uri http://localhost:8000/mute -Method POST -ContentType "application/json" -Body '{"muted": false}'
-```
+Expected:
+- Browser opens or focuses.
+- Navigates to requested site.
 
-Expect mute state to toggle.
+### 4.2 Web search
 
-### 6.5 `POST /mood/reset`
+Try:
+- "search latest ai news"
+- "search resident evil on youtube"
+- "find python fastapi tutorial"
 
-```powershell
-Invoke-RestMethod -Uri http://localhost:8000/mood/reset -Method POST
-```
+Expected:
+- Search executes in browser.
+- Results page appears for the target query/site.
 
-Resets emotional state to neutral baseline.
+### 4.3 Scroll pages
 
-### 6.6 `POST /transcribe`
+Try:
+- "scroll down"
+- "scroll up"
+- "scroll down more"
 
-If you have a WAV file:
+Expected:
+- Active webpage scrolls in requested direction.
 
-```powershell
-curl.exe -X POST "http://localhost:8000/transcribe" -F "file=@sample.wav"
-```
+### 4.4 Click elements
 
-Expect JSON with `text` or error describing format/model issue.
+Try:
+- "click first video"
+- "click login"
+- "open first result"
 
-### 6.7 `POST /chat`
+Expected:
+- Ultron attempts semantic click targeting.
+- Correct element is clicked when target is identifiable.
 
-```powershell
-Invoke-RestMethod -Uri http://localhost:8000/chat -Method POST -ContentType "application/json" -Body '{"text":"hello"}'
-```
+### 4.5 Type text into page inputs
 
-Returns `response`, `mood`, `stats`, `tool_used`, `relationship`, `desires`.
+Try:
+- "type hello from ultron"
+- "type resident evil gameplay"
 
-## 7. Chat Tool Features (Test Every Tool)
+Expected:
+- Text appears in currently focused browser input field.
 
-All tests below use `POST /chat` with natural language input. Replace prompt text as needed.
+### 4.6 Browser navigation and tabs
 
-### 7.1 App management tools
+Try:
+- "go back"
+- "go forward"
+- "open a new tab"
+- "close current tab"
 
-1. Open app
+Expected:
+- Browser history/tab actions happen immediately.
 
-```powershell
-Invoke-RestMethod -Uri http://localhost:8000/chat -Method POST -ContentType "application/json" -Body '{"text":"open notepad"}'
-```
+## 5. Desktop App Management Features
 
-2. List running apps
+### 5.1 Open apps
 
-```powershell
-Invoke-RestMethod -Uri http://localhost:8000/chat -Method POST -ContentType "application/json" -Body '{"text":"list all open apps"}'
-```
+Try:
+- "open notepad"
+- "open chrome"
+- "open discord"
 
-3. Switch app
+Expected:
+- App launches if available in known paths/start menu index.
 
-```powershell
-Invoke-RestMethod -Uri http://localhost:8000/chat -Method POST -ContentType "application/json" -Body '{"text":"switch to notepad"}'
-```
+### 5.2 List open apps
 
-4. Close app
+Try:
+- "list all open apps"
+- "what apps are running"
 
-```powershell
-Invoke-RestMethod -Uri http://localhost:8000/chat -Method POST -ContentType "application/json" -Body '{"text":"close notepad"}'
-```
+Expected:
+- Ultron responds with visible app/process list.
 
-### 7.2 System control tools
+### 5.3 Switch to app
 
-1. Set volume
+Try:
+- "switch to chrome"
+- "switch to notepad"
 
-```powershell
-Invoke-RestMethod -Uri http://localhost:8000/chat -Method POST -ContentType "application/json" -Body '{"text":"set volume to 30"}'
-```
+Expected:
+- Requested app window gets focus.
 
-2. Set brightness
+### 5.4 Close app
 
-```powershell
-Invoke-RestMethod -Uri http://localhost:8000/chat -Method POST -ContentType "application/json" -Body '{"text":"set brightness to 60"}'
-```
+Try:
+- "close notepad"
+- "close discord"
 
-3. Organize files
+Expected:
+- Matching process is terminated if found.
 
-```powershell
-Invoke-RestMethod -Uri http://localhost:8000/chat -Method POST -ContentType "application/json" -Body '{"text":"organize my downloads"}'
-```
+## 6. System Control Features
 
-4. Focus mode
+### 6.1 Volume
 
-```powershell
-Invoke-RestMethod -Uri http://localhost:8000/chat -Method POST -ContentType "application/json" -Body '{"text":"enable focus mode"}'
-```
+Try:
+- "set volume to 30"
+- "set volume to 70"
 
-5. Read clipboard
+Expected:
+- System volume changes accordingly.
 
-```powershell
-Set-Clipboard "This is a clipboard test for Ultron"
-Invoke-RestMethod -Uri http://localhost:8000/chat -Method POST -ContentType "application/json" -Body '{"text":"read clipboard"}'
-```
+### 6.2 Brightness
 
-6. Check status
+Try:
+- "set brightness to 40"
+- "set brightness to 80"
 
-```powershell
-Invoke-RestMethod -Uri http://localhost:8000/chat -Method POST -ContentType "application/json" -Body '{"text":"check system status"}'
-```
+Expected:
+- Display brightness updates (when supported by hardware/driver).
 
-7. Shutdown intent path
+### 6.3 Focus mode
 
-```powershell
-Invoke-RestMethod -Uri http://localhost:8000/chat -Method POST -ContentType "application/json" -Body '{"text":"shutdown pc"}'
-```
+Try:
+- "enable focus mode"
+- "start focus mode"
 
-Expected: safety response (manual execution note), not forced shutdown.
+Expected:
+- Ultron attempts to reduce distractions by closing configured distracting apps.
 
-### 7.3 Browser tools
+### 6.4 Organize downloads
 
-Check browser state first:
+Try:
+- "organize my downloads"
+- "clean up downloads"
 
-```powershell
-Invoke-RestMethod http://localhost:8000/browser/status
-```
+Expected:
+- Files in Downloads are moved into category folders.
 
-Then test each command:
+### 6.5 Clipboard analysis
 
-1. Navigate
+1. Copy some text first.
+2. Then ask:
+- "read clipboard"
+- "analyze my clipboard"
 
-```powershell
-Invoke-RestMethod -Uri http://localhost:8000/chat -Method POST -ContentType "application/json" -Body '{"text":"go to youtube.com"}'
-```
+Expected:
+- Ultron reads clipboard and returns a short analysis/response.
 
-2. Search
+### 6.6 System status report
 
-```powershell
-Invoke-RestMethod -Uri http://localhost:8000/chat -Method POST -ContentType "application/json" -Body '{"text":"search resident evil on youtube"}'
-```
+Try:
+- "check system status"
+- "show cpu and ram"
 
-3. Scroll
+Expected:
+- Ultron reports CPU/RAM/battery style status.
 
-```powershell
-Invoke-RestMethod -Uri http://localhost:8000/chat -Method POST -ContentType "application/json" -Body '{"text":"scroll down"}'
-```
+## 7. Voice Features In Frontend
 
-4. Click
+### 7.1 Toggle voice input mode
 
-```powershell
-Invoke-RestMethod -Uri http://localhost:8000/chat -Method POST -ContentType "application/json" -Body '{"text":"click first video"}'
-```
+In UI:
+- Switch from text mode to voice mode.
 
-5. Type
+Then speak prompts like:
+- "open youtube.com"
+- "set volume to 25"
+- "remember i like sci-fi"
 
-```powershell
-Invoke-RestMethod -Uri http://localhost:8000/chat -Method POST -ContentType "application/json" -Body '{"text":"type ultron test query"}'
-```
+Expected:
+- Speech converts to command/message.
+- Ultron executes same features as text input.
 
-6. Back
+### 7.2 Mute/unmute Ultron voice output
 
-```powershell
-Invoke-RestMethod -Uri http://localhost:8000/chat -Method POST -ContentType "application/json" -Body '{"text":"go back"}'
-```
+In UI:
+- Click mute toggle/button.
 
-7. Forward
+Expected:
+- When muted, Ultron should stop speaking responses.
+- When unmuted, speech resumes.
 
-```powershell
-Invoke-RestMethod -Uri http://localhost:8000/chat -Method POST -ContentType "application/json" -Body '{"text":"go forward"}'
-```
+## 8. Call Interception Feature (User-Level Test)
 
-8. New tab
+This feature runs in background once configured.
 
-```powershell
-Invoke-RestMethod -Uri http://localhost:8000/chat -Method POST -ContentType "application/json" -Body '{"text":"open a new tab"}'
-```
+### 8.1 Test scenario
 
-9. Close tab
+1. Keep Ultron running.
+2. Receive an incoming WhatsApp Desktop or Discord call.
+3. Wait for Ultron voice prompt.
+4. Respond verbally with:
+- Accept words: "yes", "accept", "yeah"
+- Reject words: "no", "reject", "busy"
 
-```powershell
-Invoke-RestMethod -Uri http://localhost:8000/chat -Method POST -ContentType "application/json" -Body '{"text":"close current tab"}'
-```
+Expected:
+- Ultron detects call UI.
+- Prompts by voice.
+- Performs accept/reject action based on your words.
 
-### 7.4 Memory and learning tools
+## 9. Autonomous and Proactive Behavior (Frontend Observable)
 
-1. Memorize explicit fact
+These are not always manually triggered and may appear over time.
 
-```powershell
-Invoke-RestMethod -Uri http://localhost:8000/chat -Method POST -ContentType "application/json" -Body '{"text":"remember that I like dark mode"}'
-```
+### 9.1 Spontaneous thoughts
 
-2. Background learning via web search path
+How to test:
+- Keep app open and stay idle for a while.
+- Interact occasionally and observe incoming autonomous messages.
 
-```powershell
-Invoke-RestMethod -Uri http://localhost:8000/chat -Method POST -ContentType "application/json" -Body '{"text":"research quantum computing basics"}'
-```
+Expected:
+- Ultron may send unsolicited thoughts, observations, questions, or reflections.
 
-Expect search and possible learned summary committed to memory.
+### 9.2 Activity commentary
 
-## 8. Call Interceptor Features
+How to test:
+- Switch between common apps (coding, browser, media, chat apps).
+- Continue short interactions with Ultron.
 
-### 8.1 Status, toggle, reload templates
+Expected:
+- Ultron may comment on your current activity.
 
-```powershell
-Invoke-RestMethod http://localhost:8000/call/status
-Invoke-RestMethod -Uri http://localhost:8000/call/toggle -Method POST
-Invoke-RestMethod -Uri http://localhost:8000/call/reload-templates -Method POST
-```
+### 9.3 Proactive follow-up references
 
-### 8.2 Template requirements
+How to test:
+1. Tell Ultron a fact/topic.
+2. Continue chatting for several turns.
 
-Place these PNG files in [ultron-app/backend/call_templates](ultron-app/backend/call_templates):
-- `whatsapp_incoming.png`
-- `whatsapp_accept.png`
-- `whatsapp_hangup.png`
-- `discord_incoming.png`
-- `discord_accept.png`
-- `discord_hangup.png`
+Expected:
+- Ultron may reference earlier topics proactively.
 
-### 8.3 Live call test
+## 10. Creative Features (If Exposed In Your Frontend Build)
 
-1. Ensure call monitoring is enabled.
-2. Trigger a real incoming call in WhatsApp Desktop or Discord.
-3. Confirm voice prompt asks to accept/reject.
-4. Respond verbally with accept words (`yes`, `accept`, `yeah`) or reject words (`no`, `reject`, `busy`).
-5. Confirm matching click action happens.
+Some builds wire creative tools directly via chat intent.
 
-## 9. WebSocket and Autonomous Behavior
+Try:
+- "generate code for a python calculator"
+- "generate an image of a futuristic city"
+- "create a short alert sound"
 
-WebSocket endpoint: `ws://localhost:8000/ws`
+Expected:
+- If connected in your build, Ultron returns generated output or confirmation.
+- If not connected, Ultron replies conversationally or declines.
 
-### 9.1 Test with browser frontend
+## 11. One-Pass Frontend Feature Checklist
 
-1. Open frontend and keep it connected.
-2. Stay idle or interact intermittently.
-3. Watch for autonomous thought cards/messages.
+Use this checklist to test everything quickly from the UI:
 
-### 9.2 Test with PowerShell websocket client (optional)
+1. Chat: "hello"
+2. Memory: "remember that i like strategy games"
+3. Website open: "open github.com"
+4. Search: "search fastapi tutorial"
+5. Scroll: "scroll down"
+6. Click: "click first result"
+7. Type: "type ultron frontend test"
+8. Browser back/forward
+9. New tab and close tab
+10. Open app: "open notepad"
+11. List apps: "list all open apps"
+12. Switch app
+13. Close app
+14. Set volume
+15. Set brightness
+16. Read clipboard
+17. Organize downloads
+18. Focus mode
+19. Voice input command
+20. Mute/unmute output
+21. Observe at least one autonomous/proactive message
 
-Using frontend is easiest. If using a client, connect and send periodic `ping` to keep/check connection. Expect `pong` and occasional broadcast events.
+## 12. If Something Does Not Work
 
-## 10. Frontend Feature Tests
+From a user perspective, retry with simpler wording first.
 
-Open app in browser (`npm run dev`) and verify:
+Examples:
+- Instead of "can you maybe navigate to..." use "open website.com"
+- Instead of "perhaps lower sound" use "set volume to 30"
+- Instead of long mixed commands, use one action per message
 
-1. Chat send/receive works.
-2. Mood/status widgets update after messages.
-3. Voice mode toggle appears.
-4. Mute button toggles backend mute state.
-5. WebSocket autonomous thoughts appear in chat stream.
-6. Markdown/code block rendering works (ask for code sample).
+If still failing, report the exact phrase used and what happened in UI.
 
-## 11. Persistence Verification
+## 13. Best Prompt Style For Reliable Control
 
-After interactions, confirm files in root update timestamps/content:
-- `ultron_memory.json`
-- `ultron_emotional_state.json`
-- `ultron_relationship.json`
-- `ultron_motivation.json`
-- `ultron_temporal.json`
-- `ultron_proactive.json`
-- `ultron_journal.json`
-- `ultron_quirks.json`
-- `ultron_desires.json`
+Use short imperative commands:
+- "open youtube.com"
+- "search cyberpunk 2077 on youtube"
+- "scroll down"
+- "click first video"
+- "set brightness to 60"
+- "switch to discord"
 
-## 12. Full Regression Checklist
-
-Run in this order:
-
-1. Backend starts with no import/runtime errors.
-2. Frontend connects and displays initial state.
-3. Basic chat (`hello`) works.
-4. One command from each tool category succeeds.
-5. Browser status and one browser action succeed.
-6. Mute toggle works.
-7. Mood reset works.
-8. Call status endpoints respond.
-9. WebSocket receives messages.
-10. Persistence files update.
-
-## 13. Troubleshooting
-
-### 13.1 `GROQ_API_KEY not found`
-- Ensure `.env` exists at root and contains `GROQ_API_KEY`.
-- Restart backend after changing env.
-
-### 13.2 Browser not connected
-- Check [ultron-app/backend/server.py](ultron-app/backend/server.py) startup logs.
-- Re-run `playwright install chromium`.
-- Query `GET /browser/status` and test again.
-
-### 13.3 Vosk transcription errors
-- Verify model folder exists at [ultron-app/backend/models/vosk-model-small-en-us-0.15](ultron-app/backend/models/vosk-model-small-en-us-0.15).
-- Use WAV for direct `/transcribe` tests.
-
-### 13.4 Call detection not triggering
-- Ensure templates exist and are tightly cropped.
-- Reload templates via `/call/reload-templates`.
-- Verify `/call/status` reports monitoring enabled.
-
-### 13.5 Frontend cannot call backend
-- Confirm backend on port 8000.
-- Confirm frontend URL is allowed by CORS (`localhost:5173` or `localhost:3000`).
-
-## 14. Known Limits While Testing
-
-- Windows-focused implementation.
-- Some actions are intentionally safety-limited (for example shutdown intent).
-- Emotional/compliance logic can alter tool execution behavior.
-- Call interception depends on template quality and live UI similarity.
-
-## 15. Optional: Electron Packaging Test
-
-From [ultron-app/frontend](ultron-app/frontend):
-
-```powershell
-npm run build
-npm run electron
-```
-
-For installer build:
-
-```powershell
-npm run dist
-```
-
-Ensure backend binary/resource paths in frontend package config are valid for your machine.
+This gives the highest intent-detection accuracy.

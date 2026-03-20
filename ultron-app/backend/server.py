@@ -55,16 +55,26 @@ browser_ctrl = BrowserController()
 call_interceptor = None
 
 # --- VOSK MODEL SETUP ---
-# Initialize Vosk speech recognition model (will be downloaded on first run)
-vosk_model_path = "models/vosk-model-small-en-us-0.15"
+# Initialize Vosk speech recognition model (resolve path robustly regardless of launch cwd)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+vosk_model_candidates = [
+    os.path.join(BASE_DIR, "models", "vosk-model-small-en-us-0.15"),
+    os.path.join(os.getcwd(), "models", "vosk-model-small-en-us-0.15"),
+    os.path.join(os.getcwd(), "ultron-app", "backend", "models", "vosk-model-small-en-us-0.15"),
+]
+
+vosk_model_path = next((p for p in vosk_model_candidates if os.path.exists(p)), None)
 vosk_model = None
 
 try:
-    if os.path.exists(vosk_model_path):
+    if vosk_model_path:
         vosk_model = Model(vosk_model_path)
-        logging.info("Vosk model loaded successfully")
+        logging.info(f"Vosk model loaded successfully from: {vosk_model_path}")
     else:
-        logging.warning(f"Vosk model not found at {vosk_model_path}. Voice transcription fallback will not work.")
+        logging.warning(
+            "Vosk model not found. Checked: " + " | ".join(vosk_model_candidates) +
+            ". Voice transcription fallback will not work."
+        )
 except Exception as e:
     logging.error(f"Failed to load Vosk model: {e}")
 

@@ -28,9 +28,20 @@ function ChatInterface() {
   const [isRecording, setIsRecording] = useState(false)
   const [voiceSupport, setVoiceSupport] = useState('none') // 'native', 'webkit', 'fallback', 'none'
   const [transcript, setTranscript] = useState('')
+  const [voiceError, setVoiceError] = useState('')
   const recognitionRef = useRef(null)
-  const mediaRecorderRef = useRef(null)
-  const audioChunksRef = useRef([])
+  const mediaStreamRef = useRef(null)
+  const audioContextRef = useRef(null)
+  const sourceNodeRef = useRef(null)
+  const processorNodeRef = useRef(null)
+  const pcmChunksRef = useRef([])
+  const transcriptRef = useRef('')
+  const manualStopRef = useRef(false)
+  const restartingRef = useRef(false)
+  const wantedRecordingRef = useRef(false)
+  const isVoiceModeRef = useRef(false)
+  const voiceSupportRef = useRef('none')
+  const freshSessionRef = useRef(false)
 
   // WebSocket connection for autonomous thoughts
   const { lastJsonMessage, readyState } = useWebSocket(WS_URL, {
@@ -81,14 +92,23 @@ function ChatInterface() {
   // Detect voice support on mount
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
-    if (SpeechRecognition) {
-      setVoiceSupport(window.SpeechRecognition ? 'native' : 'webkit')
-    } else if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+    // Prefer backend mode for reliability (native browser recognition often fails with network errors).
+    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
       setVoiceSupport('fallback') // MediaRecorder available for backend transcription
+    } else if (SpeechRecognition) {
+      setVoiceSupport(window.SpeechRecognition ? 'native' : 'webkit')
     } else {
       setVoiceSupport('none')
     }
   }, [])
+
+  useEffect(() => {
+    isVoiceModeRef.current = isVoiceMode
+  }, [isVoiceMode])
+
+  useEffect(() => {
+    voiceSupportRef.current = voiceSupport
+  }, [voiceSupport])
 
   // Initialize speech recognition
   const initializeSpeechRecognition = () => {
@@ -101,9 +121,16 @@ function ChatInterface() {
     recognition.lang = 'en-US'
 
     recognition.onstart = () => {
+      restartingRef.current = false
       setIsRecording(true)
-      setTranscript('')
-      setInput('')
+      // Clear transcript only for a fresh user-initiated session, not auto-restarts.
+      if (freshSessionRef.current) {
+        setTranscript('')
+        setInput('')
+        transcriptRef.current = ''
+        freshSessionRef.current = false
+      }
+      setVoiceError('')
     }
 
     recognition.onresult = (event) => {
@@ -121,65 +148,170 @@ function ChatInterface() {
 
       // Combine all final results plus interim
       const fullTranscript = finalTranscript + interimTranscript
+      transcriptRef.current = fullTranscript.trim()
       setTranscript(fullTranscript)
       setInput(fullTranscript.trim())
     }
 
     recognition.onerror = (event) => {
       console.error('Speech recognition error:', event.error)
-      setIsRecording(false)
+      setVoiceError(`Voice error: ${event.error}`)
+      // Only hard-stop for permission/capture issues. Transient errors are recoverable.
+      if (event.error === 'not-allowed' || event.error === 'service-not-allowed' || event.error === 'audio-capture') {
+        manualStopRef.current = true
+        wantedRecordingRef.current = false
+        setIsRecording(false)
+      }
     }
 
     recognition.onend = () => {
       setIsRecording(false)
-      // Don't auto-send here - user manually stops and sends
+      // Some browsers end recognition unexpectedly; auto-restart unless user explicitly stopped.
+      if (
+        wantedRecordingRef.current &&
+        !manualStopRef.current &&
+        isVoiceModeRef.current &&
+        (voiceSupportRef.current === 'native' || voiceSupportRef.current === 'webkit') &&
+        !restartingRef.current
+      ) {
+        restartingRef.current = true
+        setTimeout(() => {
+          try {
+            recognition.start()
+          } catch {
+            restartingRef.current = false
+          }
+        }, 120)
+      }
     }
 
     return recognition
   }
 
-  // Initialize MediaRecorder for fallback
-  const initializeMediaRecorder = async () => {
+  const encodeWav = (float32Samples, sampleRate) => {
+    const bytesPerSample = 2
+    const numChannels = 1
+    const blockAlign = numChannels * bytesPerSample
+    const byteRate = sampleRate * blockAlign
+    const dataSize = float32Samples.length * bytesPerSample
+    const buffer = new ArrayBuffer(44 + dataSize)
+    const view = new DataView(buffer)
+
+    const writeString = (offset, str) => {
+      for (let i = 0; i < str.length; i++) {
+        view.setUint8(offset + i, str.charCodeAt(i))
+      }
+    }
+
+    writeString(0, 'RIFF')
+    view.setUint32(4, 36 + dataSize, true)
+    writeString(8, 'WAVE')
+    writeString(12, 'fmt ')
+    view.setUint32(16, 16, true)
+    view.setUint16(20, 1, true)
+    view.setUint16(22, numChannels, true)
+    view.setUint32(24, sampleRate, true)
+    view.setUint32(28, byteRate, true)
+    view.setUint16(32, blockAlign, true)
+    view.setUint16(34, 16, true)
+    writeString(36, 'data')
+    view.setUint32(40, dataSize, true)
+
+    let offset = 44
+    for (let i = 0; i < float32Samples.length; i++, offset += 2) {
+      const s = Math.max(-1, Math.min(1, float32Samples[i]))
+      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true)
+    }
+
+    return new Blob([buffer], { type: 'audio/wav' })
+  }
+
+  // Initialize WebAudio PCM recorder for fallback
+  const initializePcmRecorder = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      const mediaRecorder = new MediaRecorder(stream)
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 })
+      const source = audioContext.createMediaStreamSource(stream)
+      const processor = audioContext.createScriptProcessor(4096, 1, 1)
 
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data)
-        }
+      pcmChunksRef.current = []
+      processor.onaudioprocess = (event) => {
+        const inputData = event.inputBuffer.getChannelData(0)
+        pcmChunksRef.current.push(new Float32Array(inputData))
       }
 
-      mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
-        audioChunksRef.current = []
+      source.connect(processor)
+      processor.connect(audioContext.destination)
 
-        // Send to backend for transcription
-        const formData = new FormData()
-        formData.append('file', audioBlob, 'recording.webm')
-
-        try {
-          const response = await axios.post(`${API_URL}/transcribe`, formData, {
-            headers: { 'Content-Type': 'multipart/form-data' }
-          })
-
-          const transcribedText = response.data.text
-          if (transcribedText) {
-            setInput(transcribedText)
-            setTimeout(() => sendMessage(), 100)
-          }
-        } catch (error) {
-          console.error('Transcription error:', error)
-        }
-
-        stream.getTracks().forEach(track => track.stop())
-        setIsRecording(false)
-      }
-
-      return mediaRecorder
+      mediaStreamRef.current = stream
+      audioContextRef.current = audioContext
+      sourceNodeRef.current = source
+      processorNodeRef.current = processor
+      return true
     } catch (error) {
-      console.error('MediaRecorder initialization error:', error)
-      return null
+      console.error('PCM recorder initialization error:', error)
+      setVoiceError('Microphone permission denied or unavailable.')
+      return false
+    }
+  }
+
+  const stopPcmRecorderAndTranscribe = async () => {
+    try {
+      if (processorNodeRef.current) {
+        processorNodeRef.current.disconnect()
+      }
+      if (sourceNodeRef.current) {
+        sourceNodeRef.current.disconnect()
+      }
+
+      const sampleRate = audioContextRef.current?.sampleRate || 16000
+      const totalLength = pcmChunksRef.current.reduce((sum, chunk) => sum + chunk.length, 0)
+      const merged = new Float32Array(totalLength)
+      let offset = 0
+      for (const chunk of pcmChunksRef.current) {
+        merged.set(chunk, offset)
+        offset += chunk.length
+      }
+
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach(track => track.stop())
+      }
+      if (audioContextRef.current) {
+        await audioContextRef.current.close()
+      }
+
+      mediaStreamRef.current = null
+      audioContextRef.current = null
+      sourceNodeRef.current = null
+      processorNodeRef.current = null
+      pcmChunksRef.current = []
+
+      if (!merged.length) {
+        setVoiceError('No audio captured. Try again and speak clearly.')
+        return
+      }
+
+      const audioBlob = encodeWav(merged, sampleRate)
+      const formData = new FormData()
+      formData.append('file', audioBlob, 'recording.wav')
+
+      const response = await axios.post(`${API_URL}/transcribe`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      })
+
+      const transcribedText = (response.data?.text || '').trim()
+      if (transcribedText) {
+        setInput(transcribedText)
+        setVoiceError('')
+        setTimeout(() => sendMessage(transcribedText), 80)
+      } else {
+        setVoiceError(response.data?.error || 'No speech detected. Try speaking louder and closer to mic.')
+      }
+    } catch (error) {
+      console.error('Transcription error:', error)
+      setVoiceError('Transcription failed. Ensure backend is running and Vosk model is loaded.')
+    } finally {
+      setIsRecording(false)
     }
   }
 
@@ -198,16 +330,31 @@ function ChatInterface() {
         recognitionRef.current = initializeSpeechRecognition()
       }
       if (recognitionRef.current) {
-        recognitionRef.current.start()
+        // Preflight mic permission to avoid silent non-capture states.
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+          stream.getTracks().forEach(track => track.stop())
+        } catch (e) {
+          setVoiceError('Microphone permission denied or unavailable.')
+          return
+        }
+
+        wantedRecordingRef.current = true
+        manualStopRef.current = false
+        freshSessionRef.current = true
+        setVoiceError('')
+        try {
+          recognitionRef.current.start()
+        } catch (e) {
+          // Ignore "already started" type errors from rapid taps.
+          console.debug('Recognition start ignored:', e)
+        }
       }
     } else if (voiceSupport === 'fallback') {
-      // Use MediaRecorder + backend
-      if (!mediaRecorderRef.current) {
-        mediaRecorderRef.current = await initializeMediaRecorder()
-      }
-      if (mediaRecorderRef.current) {
-        audioChunksRef.current = []
-        mediaRecorderRef.current.start()
+      // Use WebAudio PCM recorder + backend
+      const ok = await initializePcmRecorder()
+      if (ok) {
+        setVoiceError('')
         setIsRecording(true)
       }
     }
@@ -217,18 +364,22 @@ function ChatInterface() {
   const stopRecording = () => {
     if (voiceSupport === 'native' || voiceSupport === 'webkit') {
       if (recognitionRef.current) {
+        wantedRecordingRef.current = false
+        manualStopRef.current = true
         recognitionRef.current.stop()
         // Send the message after a brief delay to ensure transcript is captured
         setTimeout(() => {
-          if (input.trim()) {
-            sendMessage()
+          const textToSend = transcriptRef.current || input.trim()
+          if (textToSend) {
+            setInput(textToSend)
+            setTimeout(() => sendMessage(textToSend), 50)
           }
         }, 200)
       }
     } else if (voiceSupport === 'fallback') {
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-        mediaRecorderRef.current.stop()
-        // For fallback, sendMessage is called in mediaRecorder.onstop
+      if (isRecording) {
+        wantedRecordingRef.current = false
+        stopPcmRecorderAndTranscribe()
       }
     }
   }
@@ -237,10 +388,13 @@ function ChatInterface() {
   const clearTranscript = () => {
     setTranscript('')
     setInput('')
+    setVoiceError('')
+    transcriptRef.current = ''
     // If currently recording, stop and restart
     if (isRecording) {
       if (voiceSupport === 'native' || voiceSupport === 'webkit') {
         if (recognitionRef.current) {
+          manualStopRef.current = false
           recognitionRef.current.stop()
           // Brief delay before restarting
           setTimeout(() => {
@@ -250,9 +404,8 @@ function ChatInterface() {
           }, 300)
         }
       } else if (voiceSupport === 'fallback') {
-        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-          mediaRecorderRef.current.stop()
-          // Restart will happen through the UI when user clicks record again
+        if (isRecording) {
+          stopPcmRecorderAndTranscribe()
         }
       }
     }
@@ -293,12 +446,13 @@ function ChatInterface() {
   }
 
   // Send message to backend
-  const sendMessage = async () => {
-    if (!input.trim() || loading) return
+  const sendMessage = async (forcedText = null) => {
+    const textToSend = (forcedText ?? input).trim()
+    if (!textToSend || loading) return
 
     const userMessage = {
       type: 'user',
-      text: input,
+      text: textToSend,
       timestamp: new Date().toLocaleTimeString()
     }
 
@@ -308,7 +462,7 @@ function ChatInterface() {
     setIsThinking(true)
 
     try {
-      const response = await axios.post(`${API_URL}/chat`, { text: input })
+      const response = await axios.post(`${API_URL}/chat`, { text: textToSend })
       const data = response.data
 
       const botMessage = {
@@ -654,6 +808,11 @@ function ChatInterface() {
             </button>
             {voiceSupport === 'fallback' && !isRecording && (
               <div className="browser-support-badge">Backend Mode</div>
+            )}
+            {voiceError && (
+              <div className="browser-support-badge" style={{ color: '#fca5a5', borderColor: 'rgba(239, 68, 68, 0.5)' }}>
+                {voiceError}
+              </div>
             )}
           </div>
         )}

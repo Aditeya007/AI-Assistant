@@ -14,6 +14,7 @@ import threading
 import pyttsx3
 import win32gui
 import win32process
+from typing import Any, cast
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -797,7 +798,8 @@ class VoiceSystem:
     
     def _configure_voice(self):
         """Configure voice to sound cold and menacing."""
-        voices = self.engine.getProperty('voices')
+        voices_raw = self.engine.getProperty('voices')
+        voices = voices_raw if isinstance(voices_raw, list) else []
         # Try to find a male voice
         for voice in voices:
             if 'male' in voice.name.lower() or 'david' in voice.name.lower():
@@ -1035,6 +1037,10 @@ class MemorySystem:
         }
         self._save_memory()
 
+    def _save_memory(self):
+        with open(self.filename, 'w') as f:
+            json.dump(self.data, f, indent=4)
+
     def add_memory(self, text, category="user_facts"):
         """Saves a new fact to specific category."""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -1177,11 +1183,12 @@ class VectorMemorySystem:
             memory_id = f"{category}_{int(time.time() * 1000)}"
             
             # Generate embedding
-            embedding = self.encoder.encode(text).tolist()
+            embedding_raw = cast(Any, self.encoder.encode(text, convert_to_numpy=True))
+            embedding = embedding_raw.tolist() if hasattr(embedding_raw, "tolist") else list(embedding_raw)
             
             # Store with metadata
             self.collection.add(
-                embeddings=[embedding],
+                embeddings=[cast(Any, embedding)],
                 documents=[text],
                 metadatas=[{
                     "category": category,
@@ -1206,26 +1213,34 @@ class VectorMemorySystem:
         
         try:
             # Generate query embedding
-            query_embedding = self.encoder.encode(query).tolist()
+            query_embedding_raw = cast(Any, self.encoder.encode(query, convert_to_numpy=True))
+            query_embedding = query_embedding_raw.tolist() if hasattr(query_embedding_raw, "tolist") else list(query_embedding_raw)
             
             # Build where clause for category filtering
             where_clause = {"category": category_filter} if category_filter else None
             
             # Search for similar memories
             results = self.collection.query(
-                query_embeddings=[query_embedding],
+                query_embeddings=[cast(Any, query_embedding)],
                 n_results=min(limit, self.collection.count()),
                 where=where_clause
             )
             
-            if not results or not results['documents']:
+            if not results:
+                return []
+
+            documents = results.get('documents')
+            metadatas = results.get('metadatas')
+            distances = results.get('distances')
+
+            if not documents or not documents[0] or not metadatas or not metadatas[0]:
                 return []
             
             # Format results
             memories = []
-            for i, doc in enumerate(results['documents'][0]):
-                metadata = results['metadatas'][0][i]
-                distance = results['distances'][0][i] if 'distances' in results else 0
+            for i, doc in enumerate(documents[0]):
+                metadata = metadatas[0][i] if i < len(metadatas[0]) and metadatas[0][i] else {}
+                distance = distances[0][i] if distances and distances[0] and i < len(distances[0]) else 0
                 similarity = 1 - distance  # Convert distance to similarity
                 
                 if similarity >= min_similarity:
@@ -1252,13 +1267,19 @@ class VectorMemorySystem:
             # Get all memories and sort by importance
             all_results = self.collection.get()
             
-            if not all_results or not all_results['metadatas']:
+            if not all_results:
+                return []
+
+            documents = all_results.get('documents') or []
+            metadatas = all_results.get('metadatas') or []
+
+            if not documents or not metadatas:
                 return []
             
             # Sort by importance
             memories_with_importance = []
-            for i, doc in enumerate(all_results['documents']):
-                metadata = all_results['metadatas'][i]
+            for i, doc in enumerate(documents):
+                metadata = metadatas[i] if i < len(metadatas) and metadatas[i] else {}
                 memories_with_importance.append({
                     "content": doc,
                     "importance": metadata.get("importance", 0.5),
@@ -1288,7 +1309,10 @@ class VectorMemorySystem:
             if memories:
                 context_parts.append("\nRELEVANT MEMORIES:")
                 for mem in memories:
-                    context_parts.append(f"- {mem['content']} [{mem['category']}]")
+                    if isinstance(mem, dict):
+                        context_parts.append(f"- {mem.get('content', '')} [{mem.get('category', 'unknown')}]")
+                    else:
+                        context_parts.append(f"- {mem}")
         else:
             # Get most impactful memories
             impactful = self.get_impactful_memories(limit=3)
@@ -1615,7 +1639,7 @@ class ActivityMonitor:
         return {
             "current_window": self.current_activity or "Unknown",
             "tracked_activities": len(self.activity_duration),
-            "most_used": max(self.activity_duration, key=self.activity_duration.get) if self.activity_duration else "None"
+            "most_used": max(self.activity_duration.items(), key=lambda item: item[1])[0] if self.activity_duration else "None"
         }
 
 
@@ -1677,13 +1701,16 @@ class HardwareInterface:
     def refresh_app_index(self):
         logging.info("Indexing applications...")
         self.app_index = self.custom_paths.copy()
+        appdata = os.getenv("APPDATA") or ""
+        program_data = os.getenv("ProgramData") or ""
+        user_profile = os.getenv("USERPROFILE") or os.path.expanduser("~")
         scan_dirs = [
-            os.path.join(os.getenv("APPDATA"), r"Microsoft\Windows\Start Menu"),
-            os.path.join(os.getenv("ProgramData"), r"Microsoft\Windows\Start Menu"),
-            os.path.join(os.getenv("USERPROFILE"), "Desktop")
+            os.path.join(appdata, r"Microsoft\Windows\Start Menu") if appdata else "",
+            os.path.join(program_data, r"Microsoft\Windows\Start Menu") if program_data else "",
+            os.path.join(user_profile, "Desktop")
         ]
         for d in scan_dirs:
-            if os.path.exists(d):
+            if d and os.path.exists(d):
                 for root, _, files in os.walk(d):
                     for f in files:
                         if f.lower().endswith((".lnk", ".url")):
@@ -1920,8 +1947,9 @@ INSTRUCTIONS:
                 max_tokens=200,
                 temperature=0.3
             )
-            
-            summary = res.choices[0].message.content.strip()
+
+            summary_content = res.choices[0].message.content
+            summary = summary_content.strip() if summary_content else "NO_USEFUL_INFO"
             
             if "NO_USEFUL_INFO" in summary:
                 logging.info(f"No useful info extracted for: {query}")
@@ -1945,7 +1973,8 @@ INSTRUCTIONS:
 
     # --- SYSADMIN TOOLS ---
     def organize_downloads(self):
-        downloads_path = os.path.join(os.getenv("USERPROFILE"), "Downloads")
+        user_profile = os.getenv("USERPROFILE") or os.path.expanduser("~")
+        downloads_path = os.path.join(user_profile, "Downloads")
         dest_map = {
             "Images": [".jpg", ".jpeg", ".png", ".gif", ".webp"],
             "Documents": [".pdf", ".docx", ".txt", ".xlsx"],
@@ -2258,8 +2287,9 @@ class CognitiveEngine:
         """
         try:
             res = client.chat.completions.create(model=MODEL_ID, messages=[{"role": "user", "content": prompt}], max_tokens=60, temperature=0.9)
-            thought = res.choices[0].message.content.strip()
-            return thought
+            thought_content = res.choices[0].message.content
+            thought = (thought_content or "").strip()
+            return thought or None
         except Exception as e:
             logging.error(f"Autonomous thought error: {e}")
             return None
@@ -2315,10 +2345,10 @@ class CognitiveEngine:
         - shutdown_pc(): Shutdown the PC
         
         --- BROWSER (PLAYWRIGHT CHROMIUM) ---
-        - browser_navigate(url): Go to a specific URL (EX: "go to youtube.com")
-        - browser_search(query): Search anything on the web or specific sites (EX: "search cats", "search resident evil on youtube")
+        - browser_navigate(url): Go to a URL (EX: "go to youtube.com")
+        - browser_search(query): Search web/sites (EX: "search cats", "search resident evil on youtube")
         - browser_scroll(direction, amount): Scroll the page
-        - browser_click(selector): Click an element
+        - browser_click(selector): Click element by name, text, or semantic target (EX: "click login", "open first video", "click second image")
         - browser_type(text): Type text
         - browser_back(): Previous page
         - browser_forward(): Next page
@@ -2331,19 +2361,19 @@ class CognitiveEngine:
         
         - none: Greetings, questions, or conversation.
         
-        IMPORTANT: Use BROWSER TOOLS for all "search", "find", "go to", or "open website" requests.
-        Response Format: {{ "tool": "tool_name", "params": {{ "key": value }} }}
-        
-        - none: Use for greetings, questions, conversations, or anything not matching above tools
-        
-        IMPORTANT: If the user is just greeting, chatting, or asking a question, return {{"tool": "none"}}.
-        ONLY return a tool if the user is giving a CLEAR, EXPLICIT command.
+        IMPORTANT: 
+        1. Use BROWSER TOOLS for all "search", "find", "go to", "scroll", or "click" requests.
+        2. If the user is just chatting or asking a general question, return {"tool": "none"}.
+        3. ONLY return a tool for CLEAR, EXPLICIT commands.
         
         Response Format: {{ "tool": "tool_name", "params": {{ "key": value }} }}
         """
         try:
             res = client.chat.completions.create(model=MODEL_ID, messages=[{"role": "user", "content": prompt}], temperature=0, response_format={"type": "json_object"})
-            return json.loads(res.choices[0].message.content)
+            content = res.choices[0].message.content
+            if not content:
+                return {"tool": "none"}
+            return json.loads(content)
         except: return {"tool": "none"}
 
     def chat(self, user_input):
@@ -2443,8 +2473,11 @@ CODE FORMATTING: Use ```python (etc) for code blocks.
         messages = [{"role": "system", "content": sys_prompt}] + self.history + [{"role": "user", "content": user_input}]
         
         try:
-            res = client.chat.completions.create(model=MODEL_ID, messages=messages, temperature=0.85, max_tokens=400)
-            reply = res.choices[0].message.content.strip()
+            res = client.chat.completions.create(model=MODEL_ID, messages=cast(Any, messages), temperature=0.85, max_tokens=400)
+            reply_content = res.choices[0].message.content
+            reply = (reply_content or "").strip()
+            if not reply:
+                reply = "..."
             
             # Append past reference if we generated one
             if past_reference and random.random() < 0.3:
@@ -2546,6 +2579,9 @@ CODE FORMATTING: Use ```python (etc) for code blocks.
         
         if not tool or tool == "autonomous_thought":
             # Dominance drive - just generate a thought, not an action
+            return False, None, None, None
+
+        if not callable(get_params_func):
             return False, None, None, None
         
         # Build parameters based on context

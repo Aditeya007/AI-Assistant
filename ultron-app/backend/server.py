@@ -667,7 +667,7 @@ async def autonomous_thought_loop():
                                 brain.memory.add_memory(health_note, category="system_observations", importance=0.3)
                             elif tool == "web_search":
                                 query = params.get("query", "")
-                                success = hal.universal_search(query, "")
+                                success = False  # Will be set to True if learning succeeds below
                                 
                                 # Actually extract and learn from search results
                                 learned = hal.web_search_and_learn(query)

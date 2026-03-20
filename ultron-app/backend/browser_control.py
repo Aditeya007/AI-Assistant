@@ -170,13 +170,40 @@ class BrowserController:
                 return False, f"Scroll failed: {str(e)}"
 
     def click(self, selector):
-        """Click an element by selector or text."""
+        """Click an element by selector, text, or semantic target."""
         with self._lock:
             try:
                 page = self._get_active_page()
                 if not page:
                     return False, "Browser not connected"
 
+                lower_sel = selector.lower()
+                
+                # --- 1. Semantic / Video Specific Handling ---
+                if "video" in lower_sel:
+                    # YouTube specific selectors
+                    yt_selectors = [
+                        "ytd-video-renderer #video-title", 
+                        "ytd-grid-video-renderer #video-title",
+                        "a#video-title",
+                        ".ytp-play-button"
+                    ]
+                    
+                    index = 0
+                    if "first" in lower_sel or "1st" in lower_sel: index = 0
+                    elif "second" in lower_sel or "2nd" in lower_sel: index = 1
+                    elif "third" in lower_sel or "3rd" in lower_sel: index = 2
+                    
+                    for yt_sel in yt_selectors:
+                        try:
+                            elements = page.locator(yt_sel)
+                            count = elements.count()
+                            if count > index:
+                                elements.nth(index).click(timeout=3000)
+                                return True, f"Clicked {lower_sel} using {yt_sel}"
+                        except: continue
+
+                # --- 2. Generic Strategies ---
                 strategies = [
                     selector,
                     f"text={selector}",
@@ -184,14 +211,16 @@ class BrowserController:
                     f"button:has-text('{selector}')",
                     f"a:has-text('{selector}')",
                     f"input[placeholder='{selector}']",
+                    f"role=button[name='{selector}' i]",
+                    f"role=link[name='{selector}' i]"
                 ]
 
                 for strat in strategies:
                     try:
                         element = page.locator(strat).first
-                        if element.is_visible(timeout=2000):
+                        if element.is_visible(timeout=1000):
                             element.click(timeout=3000)
-                            return True, f"Clicked element: {selector}"
+                            return True, f"Clicked element: {strat}"
                     except Exception:
                         continue
 

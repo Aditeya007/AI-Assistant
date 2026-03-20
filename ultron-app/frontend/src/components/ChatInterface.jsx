@@ -29,7 +29,9 @@ function ChatInterface() {
   const [voiceSupport, setVoiceSupport] = useState('none') // 'native', 'webkit', 'fallback', 'none'
   const [transcript, setTranscript] = useState('')
   const [voiceError, setVoiceError] = useState('')
+  const [voiceStatus, setVoiceStatus] = useState('')
   const recognitionRef = useRef(null)
+  const livePreviewRecognitionRef = useRef(null)
   const mediaStreamRef = useRef(null)
   const audioContextRef = useRef(null)
   const sourceNodeRef = useRef(null)
@@ -42,6 +44,9 @@ function ChatInterface() {
   const isVoiceModeRef = useRef(false)
   const voiceSupportRef = useRef('none')
   const freshSessionRef = useRef(false)
+  const lastSpeechAtRef = useRef(0)
+  const silenceIntervalRef = useRef(null)
+  const isAutoStoppingRef = useRef(false)
 
   // WebSocket connection for autonomous thoughts
   const { lastJsonMessage, readyState } = useWebSocket(WS_URL, {
@@ -151,6 +156,7 @@ function ChatInterface() {
       transcriptRef.current = fullTranscript.trim()
       setTranscript(fullTranscript)
       setInput(fullTranscript.trim())
+      lastSpeechAtRef.current = Date.now()
     }
 
     recognition.onerror = (event) => {
@@ -166,6 +172,7 @@ function ChatInterface() {
 
     recognition.onend = () => {
       setIsRecording(false)
+      setVoiceStatus('')
       // Some browsers end recognition unexpectedly; auto-restart unless user explicitly stopped.
       if (
         wantedRecordingRef.current &&
@@ -186,6 +193,85 @@ function ChatInterface() {
     }
 
     return recognition
+  }
+
+  const startSilenceWatcher = () => {
+    if (silenceIntervalRef.current) {
+      clearInterval(silenceIntervalRef.current)
+    }
+
+    silenceIntervalRef.current = setInterval(() => {
+      if (!wantedRecordingRef.current || !isRecording) return
+      const quietForMs = Date.now() - lastSpeechAtRef.current
+      if (quietForMs > 3500 && !isAutoStoppingRef.current) {
+        isAutoStoppingRef.current = true
+        stopRecording({ autoSend: true })
+      }
+    }, 300)
+  }
+
+  const stopSilenceWatcher = () => {
+    if (silenceIntervalRef.current) {
+      clearInterval(silenceIntervalRef.current)
+      silenceIntervalRef.current = null
+    }
+  }
+
+  const startLivePreviewRecognition = () => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (!SpeechRecognition) return
+
+    const preview = new SpeechRecognition()
+    preview.continuous = true
+    preview.interimResults = true
+    preview.lang = 'en-US'
+
+    preview.onresult = (event) => {
+      let full = ''
+      for (let i = 0; i < event.results.length; i++) {
+        full += event.results[i][0].transcript + ' '
+      }
+      const text = full.trim()
+      if (text) {
+        transcriptRef.current = text
+        setTranscript(text)
+        setInput(text)
+        lastSpeechAtRef.current = Date.now()
+      }
+    }
+
+    preview.onerror = () => {
+      // Non-blocking: preview is best-effort only.
+    }
+
+    preview.onend = () => {
+      if (wantedRecordingRef.current && isVoiceModeRef.current && voiceSupportRef.current === 'fallback') {
+        try {
+          preview.start()
+        } catch {
+          // Ignore restart races.
+        }
+      }
+    }
+
+    livePreviewRecognitionRef.current = preview
+    try {
+      preview.start()
+    } catch {
+      // Ignore startup failures; recorder fallback still works.
+    }
+  }
+
+  const stopLivePreviewRecognition = () => {
+    if (livePreviewRecognitionRef.current) {
+      try {
+        livePreviewRecognitionRef.current.onend = null
+        livePreviewRecognitionRef.current.stop()
+      } catch {
+        // Ignore stop errors.
+      }
+      livePreviewRecognitionRef.current = null
+    }
   }
 
   const encodeWav = (float32Samples, sampleRate) => {
@@ -255,7 +341,7 @@ function ChatInterface() {
     }
   }
 
-  const stopPcmRecorderAndTranscribe = async () => {
+  const stopPcmRecorderAndTranscribe = async (autoSend = false) => {
     try {
       if (processorNodeRef.current) {
         processorNodeRef.current.disconnect()
@@ -302,10 +388,16 @@ function ChatInterface() {
       const transcribedText = (response.data?.text || '').trim()
       if (transcribedText) {
         setInput(transcribedText)
+        setTranscript(transcribedText)
+        transcriptRef.current = transcribedText
         setVoiceError('')
-        setTimeout(() => sendMessage(transcribedText), 80)
+        setVoiceStatus(autoSend ? 'Silence detected. Sending...' : 'Recorded. Review and send or discard.')
+        if (autoSend) {
+          setTimeout(() => sendMessage(transcribedText), 80)
+        }
       } else {
         setVoiceError(response.data?.error || 'No speech detected. Try speaking louder and closer to mic.')
+        setVoiceStatus('')
       }
     } catch (error) {
       console.error('Transcription error:', error)
@@ -342,9 +434,13 @@ function ChatInterface() {
         wantedRecordingRef.current = true
         manualStopRef.current = false
         freshSessionRef.current = true
+        isAutoStoppingRef.current = false
+        lastSpeechAtRef.current = Date.now()
         setVoiceError('')
+        setVoiceStatus('Listening...')
         try {
           recognitionRef.current.start()
+          startSilenceWatcher()
         } catch (e) {
           // Ignore "already started" type errors from rapid taps.
           console.debug('Recognition start ignored:', e)
@@ -354,34 +450,49 @@ function ChatInterface() {
       // Use WebAudio PCM recorder + backend
       const ok = await initializePcmRecorder()
       if (ok) {
+        wantedRecordingRef.current = true
+        isAutoStoppingRef.current = false
+        lastSpeechAtRef.current = Date.now()
+        setTranscript('')
+        transcriptRef.current = ''
         setVoiceError('')
+        setVoiceStatus('Listening...')
         setIsRecording(true)
+        startSilenceWatcher()
+        startLivePreviewRecognition()
       }
     }
   }
 
   // Stop recording
-  const stopRecording = () => {
+  const stopRecording = ({ autoSend = false } = {}) => {
+    stopSilenceWatcher()
     if (voiceSupport === 'native' || voiceSupport === 'webkit') {
       if (recognitionRef.current) {
         wantedRecordingRef.current = false
         manualStopRef.current = true
+        setVoiceStatus(autoSend ? 'Silence detected. Sending...' : 'Recorded. Review and send or discard.')
         recognitionRef.current.stop()
-        // Send the message after a brief delay to ensure transcript is captured
         setTimeout(() => {
           const textToSend = transcriptRef.current || input.trim()
           if (textToSend) {
             setInput(textToSend)
-            setTimeout(() => sendMessage(textToSend), 50)
+            setTranscript(textToSend)
+            if (autoSend) {
+              setTimeout(() => sendMessage(textToSend), 50)
+            }
           }
         }, 200)
       }
     } else if (voiceSupport === 'fallback') {
       if (isRecording) {
         wantedRecordingRef.current = false
-        stopPcmRecorderAndTranscribe()
+        stopLivePreviewRecognition()
+        stopPcmRecorderAndTranscribe(autoSend)
       }
     }
+
+    isAutoStoppingRef.current = false
   }
 
   // Clear transcript when voice recognition picks up something wrong
@@ -389,6 +500,7 @@ function ChatInterface() {
     setTranscript('')
     setInput('')
     setVoiceError('')
+    setVoiceStatus('')
     transcriptRef.current = ''
     // If currently recording, stop and restart
     if (isRecording) {
@@ -405,11 +517,19 @@ function ChatInterface() {
         }
       } else if (voiceSupport === 'fallback') {
         if (isRecording) {
-          stopPcmRecorderAndTranscribe()
+          stopLivePreviewRecognition()
+          stopPcmRecorderAndTranscribe(false)
         }
       }
     }
   }
+
+  useEffect(() => {
+    return () => {
+      stopSilenceWatcher()
+      stopLivePreviewRecognition()
+    }
+  }, [])
 
   // Handle autonomous thoughts from WebSocket
   useEffect(() => {
@@ -798,20 +918,41 @@ function ChatInterface() {
             )}
             <button
               className={`voice-button ${isRecording ? 'recording' : ''}`}
-              onClick={isRecording ? stopRecording : startRecording}
+              onClick={isRecording ? () => stopRecording({ autoSend: false }) : startRecording}
               disabled={loading}
             >
               {isRecording ? '⏹️' : '🎙️'}
               <span className="voice-button-text">
-                {isRecording ? 'Stop & Send' : 'Tap to Speak'}
+                {isRecording ? 'Tap to Stop' : 'Tap to Speak'}
               </span>
             </button>
             {voiceSupport === 'fallback' && !isRecording && (
               <div className="browser-support-badge">Backend Mode</div>
             )}
+            {voiceStatus && (
+              <div className="browser-support-badge">{voiceStatus}</div>
+            )}
             {voiceError && (
               <div className="browser-support-badge" style={{ color: '#fca5a5', borderColor: 'rgba(239, 68, 68, 0.5)' }}>
                 {voiceError}
+              </div>
+            )}
+            {!isRecording && (input.trim() || transcript.trim()) && (
+              <div className="voice-action-row">
+                <button
+                  className="voice-send-button"
+                  onClick={() => sendMessage(transcriptRef.current || input)}
+                  disabled={loading}
+                >
+                  Send
+                </button>
+                <button
+                  className="voice-discard-button"
+                  onClick={clearTranscript}
+                  disabled={loading}
+                >
+                  Discard
+                </button>
               </div>
             )}
           </div>

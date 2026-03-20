@@ -2363,7 +2363,7 @@ class CognitiveEngine:
         
         IMPORTANT: 
         1. Use BROWSER TOOLS for all "search", "find", "go to", "scroll", or "click" requests.
-        2. If the user is just chatting or asking a general question, return {"tool": "none"}.
+        2. If the user is just chatting or asking a general question, return {{"tool": "none"}}.
         3. ONLY return a tool for CLEAR, EXPLICIT commands.
         
         Response Format: {{ "tool": "tool_name", "params": {{ "key": value }} }}

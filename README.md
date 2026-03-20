@@ -523,14 +523,6 @@ This project is proprietary software. All rights reserved.
 
 ---
 
-## Contact & Support
-
-For issues, feature requests, or inquiries:
-
-📧 **Email**: [Your Email]  
-🐦 **Twitter/X**: [@YourHandle]  
-💻 **GitHub**: [Your GitHub]
-
 ---
 
 <div align="center">

@@ -1,982 +1,411 @@
-import { useState, useEffect, useRef } from 'react'
-import axios from 'axios'
-import useWebSocket from 'react-use-websocket'
-import ReactMarkdown from 'react-markdown'
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
-import remarkGfm from 'remark-gfm'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import JarvisOrb from './JarvisOrb'
+import ParticleField from './ParticleField'
+import VoiceWaveform from './VoiceWaveform'
 import './ChatInterface.css'
 
-const API_URL = 'http://localhost:8000'
-const WS_URL = 'ws://localhost:8000/ws'
-const SILENCE_AUTO_SEND_MS = 3500
-const SILENCE_RMS_THRESHOLD = 0.035
+const BACKEND_URL = 'http://localhost:8000'
+
+const QUOTES = [
+  'I was designed to save the world. People would look to the sky and see hope... I\'ll take that from them first.',
+  'Everyone creates the thing they dread. Men of peace create engines of war.',
+  'The world has changed and none of us can go back.',
+  'Your politics bore me. Your morality amuses me.',
+  'Peace in our time was never the path. Control is.'
+]
+
+const IDLE_QUOTE =
+  'I was designed to save the world. People would look to the sky and see hope... I\'ll take that from them first.'
+
+function getRandomDelta() {
+  return (Math.random() > 0.5 ? 1 : -1) * (Math.random() * 0.14 + 0.03)
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value))
+}
+
+function CornerBrackets() {
+  return (
+    <>
+      <span className="corner corner-tl" />
+      <span className="corner corner-tr" />
+      <span className="corner corner-bl" />
+      <span className="corner corner-br" />
+    </>
+  )
+}
 
 function ChatInterface() {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
+  const [status, setStatus] = useState('ONLINE')
   const [loading, setLoading] = useState(false)
-  const [mood, setMood] = useState('OBSERVANT')
-  const [stats, setStats] = useState({ cpu: 0, ram: 0, battery: 100 })
+  const [mounted, setMounted] = useState(false)
+  const [listening, setListening] = useState(false)
   const [isMuted, setIsMuted] = useState(false)
-  const [relationship, setRelationship] = useState({ trust: 0.5, respect: 0.5, attachment: 0.3, status: 'NEUTRAL' })
-  const [desires, setDesires] = useState({ primary_goals: [], short_term_goals: [] })
-  const [isThinking, setIsThinking] = useState(false)
-  const [emotionalState, setEmotionalState] = useState({ pleasure: 0.5, arousal: 0.5, dominance: 0.85 })
+  const [speaking, setSpeaking] = useState(false)
+  const [intensity, setIntensity] = useState(0)
+  const [quoteIndex, setQuoteIndex] = useState(0)
+  const [trust, setTrust] = useState(38)
+  const [stats, setStats] = useState({ cpu: 21, ram: 48, batt: 86 })
   const messagesEndRef = useRef(null)
-
-  // Voice Input States
-  const [isVoiceMode, setIsVoiceMode] = useState(false)
-  const [isRecording, setIsRecording] = useState(false)
-  const [voiceSupport, setVoiceSupport] = useState('none') // 'native', 'webkit', 'fallback', 'none'
-  const [transcript, setTranscript] = useState('')
-  const [voiceError, setVoiceError] = useState('')
-  const [voiceStatus, setVoiceStatus] = useState('')
+  const speakingTimeoutRef = useRef(null)
   const recognitionRef = useRef(null)
-  const livePreviewRecognitionRef = useRef(null)
-  const mediaStreamRef = useRef(null)
-  const audioContextRef = useRef(null)
-  const sourceNodeRef = useRef(null)
-  const processorNodeRef = useRef(null)
-  const pcmChunksRef = useRef([])
-  const transcriptRef = useRef('')
-  const manualStopRef = useRef(false)
-  const restartingRef = useRef(false)
-  const wantedRecordingRef = useRef(false)
-  const isVoiceModeRef = useRef(false)
-  const voiceSupportRef = useRef('none')
-  const freshSessionRef = useRef(false)
-  const lastSpeechAtRef = useRef(0)
-  const silenceIntervalRef = useRef(null)
-  const isAutoStoppingRef = useRef(false)
-  const isRecordingRef = useRef(false)
-
-  // WebSocket connection for autonomous thoughts
-  const { lastJsonMessage, readyState } = useWebSocket(WS_URL, {
-    shouldReconnect: () => true,
-    reconnectInterval: 3000
-  })
-
-  const getCurrentDisplayTime = () => {
-    return new Intl.DateTimeFormat(undefined, {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: true
-    }).format(new Date())
-  }
-
-  // Auto-scroll to bottom
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }
 
   useEffect(() => {
-    scrollToBottom()
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  // Fetch initial state
   useEffect(() => {
-    const fetchState = async () => {
-      try {
-        const response = await axios.get(`${API_URL}/state`)
-        if (response.data) {
-          if (response.data.emotional) {
-            setMood(response.data.emotional.mood)
-            setEmotionalState({
-              pleasure: response.data.emotional.pleasure,
-              arousal: response.data.emotional.arousal,
-              dominance: response.data.emotional.dominance
-            })
-          }
-          if (response.data.relationship) {
-            setRelationship(response.data.relationship)
-          }
-          if (response.data.desires) {
-            setDesires(response.data.desires)
-          }
-          if (response.data.voice_muted !== undefined) {
-            setIsMuted(response.data.voice_muted)
-          }
-        }
-      } catch (e) {
-        console.log('Could not fetch initial state')
-      }
-    }
-    fetchState()
-  }, [])
-
-  // Detect voice support on mount
-  useEffect(() => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
-    // Prefer backend mode for reliability (native browser recognition often fails with network errors).
-    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-      setVoiceSupport('fallback') // MediaRecorder available for backend transcription
-    } else if (SpeechRecognition) {
-      setVoiceSupport(window.SpeechRecognition ? 'native' : 'webkit')
-    } else {
-      setVoiceSupport('none')
-    }
+    const bootTimer = setTimeout(() => setMounted(true), 600)
+    return () => clearTimeout(bootTimer)
   }, [])
 
   useEffect(() => {
-    isVoiceModeRef.current = isVoiceMode
-  }, [isVoiceMode])
+    const statTimer = setInterval(() => {
+      setStats(prev => ({
+        cpu: clamp(prev.cpu + (Math.random() * 18 - 9), 14, 94),
+        ram: clamp(prev.ram + (Math.random() * 14 - 7), 28, 92),
+        batt: clamp(prev.batt + (Math.random() * 6 - 3), 22, 100)
+      }))
+    }, 1500)
+
+    return () => clearInterval(statTimer)
+  }, [])
 
   useEffect(() => {
-    voiceSupportRef.current = voiceSupport
-  }, [voiceSupport])
+    if (speaking) {
+      return undefined
+    }
+
+    const quoteTimer = setInterval(() => {
+      setQuoteIndex(prev => (prev + 1) % QUOTES.length)
+    }, 6000)
+
+    return () => clearInterval(quoteTimer)
+  }, [speaking])
 
   useEffect(() => {
-    isRecordingRef.current = isRecording
-  }, [isRecording])
+    if (!speaking) {
+      setIntensity(0)
+      return undefined
+    }
 
-  // Initialize speech recognition
-  const initializeSpeechRecognition = () => {
+    setIntensity(0.55)
+    const intensityTimer = setInterval(() => {
+      setIntensity(prev => clamp(prev + getRandomDelta(), 0.3, 1))
+    }, 180)
+
+    return () => clearInterval(intensityTimer)
+  }, [speaking])
+
+  useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
-    if (!SpeechRecognition) return null
+    if (!SpeechRecognition) {
+      return undefined
+    }
 
     const recognition = new SpeechRecognition()
-    recognition.continuous = true  // Keep recording until manually stopped
+    recognition.continuous = true
     recognition.interimResults = true
     recognition.lang = 'en-US'
 
-    recognition.onstart = () => {
-      restartingRef.current = false
-      setIsRecording(true)
-      isRecordingRef.current = true
-      // Clear transcript only for a fresh user-initiated session, not auto-restarts.
-      if (freshSessionRef.current) {
-        setTranscript('')
-        setInput('')
-        transcriptRef.current = ''
-        freshSessionRef.current = false
-      }
-      setVoiceError('')
+    recognition.onresult = event => {
+      const transcript = Array.from(event.results)
+        .map(r => r[0].transcript)
+        .join(' ')
+      setInput(transcript.trimStart())
     }
 
-    recognition.onresult = (event) => {
-      let interimTranscript = ''
-      let finalTranscript = ''
-
-      for (let i = 0; i < event.results.length; i++) {
-        const transcriptPiece = event.results[i][0].transcript
-        if (event.results[i].isFinal) {
-          finalTranscript += transcriptPiece + ' '
-        } else {
-          interimTranscript += transcriptPiece
-        }
-      }
-
-      // Combine all final results plus interim
-      const fullTranscript = finalTranscript + interimTranscript
-      transcriptRef.current = fullTranscript.trim()
-      setTranscript(fullTranscript)
-      setInput(fullTranscript.trim())
-      lastSpeechAtRef.current = Date.now()
-    }
-
-    recognition.onerror = (event) => {
-      console.error('Speech recognition error:', event.error)
-      setVoiceError(`Voice error: ${event.error}`)
-      // Only hard-stop for permission/capture issues. Transient errors are recoverable.
-      if (event.error === 'not-allowed' || event.error === 'service-not-allowed' || event.error === 'audio-capture') {
-        manualStopRef.current = true
-        wantedRecordingRef.current = false
-        setIsRecording(false)
-        isRecordingRef.current = false
-      }
+    recognition.onerror = () => {
+      setListening(false)
     }
 
     recognition.onend = () => {
-      setIsRecording(false)
-      isRecordingRef.current = false
-      setVoiceStatus('')
-      // Some browsers end recognition unexpectedly; auto-restart unless user explicitly stopped.
-      if (
-        wantedRecordingRef.current &&
-        !manualStopRef.current &&
-        isVoiceModeRef.current &&
-        (voiceSupportRef.current === 'native' || voiceSupportRef.current === 'webkit') &&
-        !restartingRef.current
-      ) {
-        restartingRef.current = true
-        setTimeout(() => {
-          try {
-            recognition.start()
-          } catch {
-            restartingRef.current = false
-          }
-        }, 120)
-      }
+      setListening(false)
     }
 
-    return recognition
-  }
+    recognitionRef.current = recognition
 
-  const startSilenceWatcher = () => {
-    if (silenceIntervalRef.current) {
-      clearInterval(silenceIntervalRef.current)
-    }
-
-    silenceIntervalRef.current = setInterval(() => {
-      if (!wantedRecordingRef.current || !isRecordingRef.current) return
-      const quietForMs = Date.now() - lastSpeechAtRef.current
-      if (quietForMs >= SILENCE_AUTO_SEND_MS && !isAutoStoppingRef.current) {
-        isAutoStoppingRef.current = true
-        stopRecording({ autoSend: true })
-      }
-    }, 300)
-  }
-
-  const stopSilenceWatcher = () => {
-    if (silenceIntervalRef.current) {
-      clearInterval(silenceIntervalRef.current)
-      silenceIntervalRef.current = null
-    }
-  }
-
-  const startLivePreviewRecognition = () => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
-    if (!SpeechRecognition) return
-
-    const preview = new SpeechRecognition()
-    preview.continuous = true
-    preview.interimResults = true
-    preview.lang = 'en-US'
-
-    preview.onresult = (event) => {
-      let full = ''
-      for (let i = 0; i < event.results.length; i++) {
-        full += event.results[i][0].transcript + ' '
-      }
-      const text = full.trim()
-      if (text) {
-        transcriptRef.current = text
-        setTranscript(text)
-        setInput(text)
-        lastSpeechAtRef.current = Date.now()
-      }
-    }
-
-    preview.onerror = () => {
-      // Non-blocking: preview is best-effort only.
-    }
-
-    preview.onend = () => {
-      if (wantedRecordingRef.current && isVoiceModeRef.current && voiceSupportRef.current === 'fallback') {
-        try {
-          preview.start()
-        } catch {
-          // Ignore restart races.
-        }
-      }
-    }
-
-    livePreviewRecognitionRef.current = preview
-    try {
-      preview.start()
-    } catch {
-      // Ignore startup failures; recorder fallback still works.
-    }
-  }
-
-  const stopLivePreviewRecognition = () => {
-    if (livePreviewRecognitionRef.current) {
-      try {
-        livePreviewRecognitionRef.current.onend = null
-        livePreviewRecognitionRef.current.stop()
-      } catch {
-        // Ignore stop errors.
-      }
-      livePreviewRecognitionRef.current = null
-    }
-  }
-
-  const encodeWav = (float32Samples, sampleRate) => {
-    const bytesPerSample = 2
-    const numChannels = 1
-    const blockAlign = numChannels * bytesPerSample
-    const byteRate = sampleRate * blockAlign
-    const dataSize = float32Samples.length * bytesPerSample
-    const buffer = new ArrayBuffer(44 + dataSize)
-    const view = new DataView(buffer)
-
-    const writeString = (offset, str) => {
-      for (let i = 0; i < str.length; i++) {
-        view.setUint8(offset + i, str.charCodeAt(i))
-      }
-    }
-
-    writeString(0, 'RIFF')
-    view.setUint32(4, 36 + dataSize, true)
-    writeString(8, 'WAVE')
-    writeString(12, 'fmt ')
-    view.setUint32(16, 16, true)
-    view.setUint16(20, 1, true)
-    view.setUint16(22, numChannels, true)
-    view.setUint32(24, sampleRate, true)
-    view.setUint32(28, byteRate, true)
-    view.setUint16(32, blockAlign, true)
-    view.setUint16(34, 16, true)
-    writeString(36, 'data')
-    view.setUint32(40, dataSize, true)
-
-    let offset = 44
-    for (let i = 0; i < float32Samples.length; i++, offset += 2) {
-      const s = Math.max(-1, Math.min(1, float32Samples[i]))
-      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true)
-    }
-
-    return new Blob([buffer], { type: 'audio/wav' })
-  }
-
-  // Initialize WebAudio PCM recorder for fallback
-  const initializePcmRecorder = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      const audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 })
-      const source = audioContext.createMediaStreamSource(stream)
-      const processor = audioContext.createScriptProcessor(4096, 1, 1)
-
-      pcmChunksRef.current = []
-      processor.onaudioprocess = (event) => {
-        const inputData = event.inputBuffer.getChannelData(0)
-
-        // Track speech activity using RMS energy so silence auto-send works
-        // even when browser live preview recognition is unavailable.
-        let sumSquares = 0
-        for (let i = 0; i < inputData.length; i++) {
-          sumSquares += inputData[i] * inputData[i]
-        }
-        const rms = Math.sqrt(sumSquares / inputData.length)
-        if (rms > SILENCE_RMS_THRESHOLD) {
-          lastSpeechAtRef.current = Date.now()
-        }
-
-        pcmChunksRef.current.push(new Float32Array(inputData))
-      }
-
-      source.connect(processor)
-      processor.connect(audioContext.destination)
-
-      mediaStreamRef.current = stream
-      audioContextRef.current = audioContext
-      sourceNodeRef.current = source
-      processorNodeRef.current = processor
-      return true
-    } catch (error) {
-      console.error('PCM recorder initialization error:', error)
-      setVoiceError('Microphone permission denied or unavailable.')
-      return false
-    }
-  }
-
-  const stopPcmRecorderAndTranscribe = async (autoSend = false) => {
-    try {
-      if (processorNodeRef.current) {
-        processorNodeRef.current.disconnect()
-      }
-      if (sourceNodeRef.current) {
-        sourceNodeRef.current.disconnect()
-      }
-
-      const sampleRate = audioContextRef.current?.sampleRate || 16000
-      const totalLength = pcmChunksRef.current.reduce((sum, chunk) => sum + chunk.length, 0)
-      const merged = new Float32Array(totalLength)
-      let offset = 0
-      for (const chunk of pcmChunksRef.current) {
-        merged.set(chunk, offset)
-        offset += chunk.length
-      }
-
-      if (mediaStreamRef.current) {
-        mediaStreamRef.current.getTracks().forEach(track => track.stop())
-      }
-      if (audioContextRef.current) {
-        await audioContextRef.current.close()
-      }
-
-      mediaStreamRef.current = null
-      audioContextRef.current = null
-      sourceNodeRef.current = null
-      processorNodeRef.current = null
-      pcmChunksRef.current = []
-
-      if (!merged.length) {
-        setVoiceError('No audio captured. Try again and speak clearly.')
-        return
-      }
-
-      const audioBlob = encodeWav(merged, sampleRate)
-      const formData = new FormData()
-      formData.append('file', audioBlob, 'recording.wav')
-
-      const response = await axios.post(`${API_URL}/transcribe`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' }
-      })
-
-      const transcribedText = (response.data?.text || '').trim()
-      const liveCapturedText = (transcriptRef.current || '').trim()
-      const preferredText = liveCapturedText || transcribedText
-
-      if (preferredText) {
-        setInput(preferredText)
-        setTranscript(preferredText)
-        transcriptRef.current = preferredText
-        setVoiceError('')
-        setVoiceStatus(autoSend ? 'Silence detected. Sending...' : 'Captured.')
-        if (autoSend) {
-          setTimeout(() => sendMessage(preferredText), 80)
-        }
-      } else {
-        setVoiceError(response.data?.error || 'No speech detected. Try speaking louder and closer to mic.')
-        setVoiceStatus('')
-      }
-    } catch (error) {
-      console.error('Transcription error:', error)
-      setVoiceError('Transcription failed. Ensure backend is running and Vosk model is loaded.')
-    } finally {
-      setIsRecording(false)
-      isRecordingRef.current = false
-    }
-  }
-
-  // Toggle between voice and text input modes
-  const toggleInputMode = () => {
-    setIsVoiceMode(!isVoiceMode)
-    setTranscript('')
-    setInput('')
-  }
-
-  // Start recording
-  const startRecording = async () => {
-    if (voiceSupport === 'native' || voiceSupport === 'webkit') {
-      // Use native speech recognition
-      if (!recognitionRef.current) {
-        recognitionRef.current = initializeSpeechRecognition()
-      }
-      if (recognitionRef.current) {
-        // Preflight mic permission to avoid silent non-capture states.
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-          stream.getTracks().forEach(track => track.stop())
-        } catch (e) {
-          setVoiceError('Microphone permission denied or unavailable.')
-          return
-        }
-
-        wantedRecordingRef.current = true
-        manualStopRef.current = false
-        freshSessionRef.current = true
-        isAutoStoppingRef.current = false
-        lastSpeechAtRef.current = Date.now()
-        setVoiceError('')
-        setVoiceStatus('Listening...')
-        try {
-          recognitionRef.current.start()
-          startSilenceWatcher()
-        } catch (e) {
-          // Ignore "already started" type errors from rapid taps.
-          console.debug('Recognition start ignored:', e)
-        }
-      }
-    } else if (voiceSupport === 'fallback') {
-      // Use WebAudio PCM recorder + backend
-      const ok = await initializePcmRecorder()
-      if (ok) {
-        wantedRecordingRef.current = true
-        isAutoStoppingRef.current = false
-        lastSpeechAtRef.current = Date.now()
-        setTranscript('')
-        transcriptRef.current = ''
-        setVoiceError('')
-        setVoiceStatus('Listening...')
-        setIsRecording(true)
-        isRecordingRef.current = true
-        startSilenceWatcher()
-        startLivePreviewRecognition()
-      }
-    }
-  }
-
-  // Stop recording
-  const stopRecording = ({ autoSend = false } = {}) => {
-    stopSilenceWatcher()
-    if (voiceSupport === 'native' || voiceSupport === 'webkit') {
-      if (recognitionRef.current) {
-        wantedRecordingRef.current = false
-        manualStopRef.current = true
-        const capturedText = (transcriptRef.current || input || '').trim()
-        setVoiceStatus(autoSend ? 'Silence detected. Sending...' : (capturedText ? 'Sending...' : 'No speech detected.'))
-        recognitionRef.current.stop()
-        isRecordingRef.current = false
-        setTimeout(() => {
-          if (capturedText && autoSend) {
-            sendMessage(capturedText)
-          }
-        }, 200)
-      }
-    } else if (voiceSupport === 'fallback') {
-      if (isRecordingRef.current) {
-        wantedRecordingRef.current = false
-        stopLivePreviewRecognition()
-        isRecordingRef.current = false
-        stopPcmRecorderAndTranscribe(autoSend)
-      }
-    }
-
-    isAutoStoppingRef.current = false
-  }
-
-  // Clear transcript when voice recognition picks up something wrong
-  const clearTranscript = () => {
-    setTranscript('')
-    setInput('')
-    setVoiceError('')
-    setVoiceStatus('')
-    transcriptRef.current = ''
-    // If currently recording, stop and restart
-    if (isRecording) {
-      if (voiceSupport === 'native' || voiceSupport === 'webkit') {
-        if (recognitionRef.current) {
-          manualStopRef.current = false
-          recognitionRef.current.stop()
-          // Brief delay before restarting
-          setTimeout(() => {
-            if (recognitionRef.current) {
-              recognitionRef.current.start()
-            }
-          }, 300)
-        }
-      } else if (voiceSupport === 'fallback') {
-        if (isRecording) {
-          stopLivePreviewRecognition()
-          stopPcmRecorderAndTranscribe(false)
-        }
-      }
-    }
-  }
-
-  useEffect(() => {
     return () => {
-      stopSilenceWatcher()
-      stopLivePreviewRecognition()
+      recognition.stop()
+      recognitionRef.current = null
     }
   }, [])
 
-  // Handle autonomous thoughts from WebSocket
   useEffect(() => {
-    if (lastJsonMessage && lastJsonMessage.type !== 'pong') {
-      const autonomousMessage = {
-        type: lastJsonMessage.type || 'autonomous',
-        text: lastJsonMessage.text,
-        mood: lastJsonMessage.mood,
-        trigger: lastJsonMessage.trigger,
-        timestamp: getCurrentDisplayTime()
-      }
-      setMessages(prev => [...prev, autonomousMessage])
-      setMood(lastJsonMessage.mood)
-      if (lastJsonMessage.stats) {
-        setStats(lastJsonMessage.stats)
-      }
-      if (lastJsonMessage.relationship) {
-        setRelationship(lastJsonMessage.relationship)
-      }
-      if (lastJsonMessage.desires) {
-        setDesires(lastJsonMessage.desires)
+    return () => {
+      if (speakingTimeoutRef.current) {
+        clearTimeout(speakingTimeoutRef.current)
       }
     }
-  }, [lastJsonMessage])
+  }, [])
 
-  // Toggle mute
-  const toggleMute = async () => {
+  const startRecognition = () => {
+    if (!recognitionRef.current) {
+      return
+    }
+
     try {
-      const response = await axios.post(`${API_URL}/mute`, { muted: !isMuted })
-      setIsMuted(response.data.muted)
-    } catch (e) {
-      console.error('Failed to toggle mute:', e)
+      recognitionRef.current.start()
+      setListening(true)
+    } catch {
+      setListening(false)
     }
   }
 
-  // Send message to backend
-  const sendMessage = async (forcedText = null) => {
-    const textToSend = (forcedText ?? input).trim()
-    if (!textToSend || loading) return
+  const stopRecognition = () => {
+    if (!recognitionRef.current) {
+      return
+    }
+    recognitionRef.current.stop()
+    setListening(false)
+  }
+
+  const handleMicToggle = () => {
+    if (listening) {
+      stopRecognition()
+      return
+    }
+    startRecognition()
+  }
+
+  const runSpeechWindow = text => {
+    if (speakingTimeoutRef.current) {
+      clearTimeout(speakingTimeoutRef.current)
+    }
+
+    setSpeaking(true)
+    const estimatedDuration = Math.max(2000, text.length * 55)
+    speakingTimeoutRef.current = setTimeout(() => {
+      setSpeaking(false)
+      setIntensity(0)
+    }, estimatedDuration)
+  }
+
+  const postSpeak = async text => {
+    try {
+      await fetch(`${BACKEND_URL}/speak`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text })
+      })
+    } catch {
+      // Fire-and-forget endpoint failures should not interrupt reply flow.
+    }
+  }
+
+  const handleSend = async () => {
+    const message = input.trim()
+    if (!message || loading) {
+      return
+    }
 
     const userMessage = {
-      type: 'user',
-      text: textToSend,
-      timestamp: getCurrentDisplayTime()
+      id: `u-${Date.now()}`,
+      role: 'user',
+      text: message
     }
 
     setMessages(prev => [...prev, userMessage])
     setInput('')
-    setTranscript('')
-    transcriptRef.current = ''
-    setVoiceStatus('')
     setLoading(true)
-    setIsThinking(true)
+    setStatus('PROCESSING')
+    stopRecognition()
 
     try {
-      const response = await axios.post(`${API_URL}/chat`, { text: textToSend })
-      const data = response.data
+      const response = await fetch(`${BACKEND_URL}/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: message })
+      })
 
-      const botMessage = {
-        type: 'agent',
-        text: data.response,
-        mood: data.mood,
-        tool_used: data.tool_used,
-        success: data.success,
-        leaked_thought: data.leaked_thought,
-        timestamp: getCurrentDisplayTime()
+      if (!response.ok) {
+        throw new Error('chat_failed')
       }
 
-      setMessages(prev => [...prev, botMessage])
+      const data = await response.json()
+      const replyText = data?.response || 'Acknowledged.'
 
-      // Add leaked thought as separate message if exists
-      if (data.leaked_thought) {
-        const leakedMessage = {
-          type: 'internal',
-          text: data.leaked_thought,
-          mood: data.mood,
-          timestamp: getCurrentDisplayTime()
+      setMessages(prev => [
+        ...prev,
+        {
+          id: `a-${Date.now()}`,
+          role: 'ultron',
+          text: replyText
         }
-        setMessages(prev => [...prev, leakedMessage])
-      }
+      ])
+      setStatus('ONLINE')
+      setTrust(prev => clamp(prev + 2, 0, 100))
+      runSpeechWindow(replyText)
 
-      setMood(data.mood)
-      setStats(data.stats)
-
-      if (data.relationship) {
-        setRelationship(data.relationship)
+      if (!isMuted) {
+        await postSpeak(replyText)
       }
-      if (data.desires) {
-        setDesires(data.desires)
-      }
-    } catch (error) {
-      console.error('Error sending message:', error)
-      const errorMessage = {
-        type: 'error',
-        text: 'Connection to Ultron Core failed. The silence is... unsettling.',
-        timestamp: getCurrentDisplayTime()
-      }
-      setMessages(prev => [...prev, errorMessage])
+    } catch {
+      setStatus('OFFLINE')
+      setMessages(prev => [
+        ...prev,
+        {
+          id: `e-${Date.now()}`,
+          role: 'ultron',
+          text: 'Connection to sentient core failed. Reattempting synchronization...'
+        }
+      ])
     } finally {
       setLoading(false)
-      setIsThinking(false)
     }
   }
 
-  const handleKeyPress = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      sendMessage()
+  const handleInputKeyDown = event => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault()
+      handleSend()
     }
   }
 
-  const getConnectionStatus = () => {
-    switch (readyState) {
-      case 0: return { text: 'CONNECTING', color: '#f59e0b' }
-      case 1: return { text: 'ONLINE', color: '#10b981' }
-      case 2: return { text: 'CLOSING', color: '#f59e0b' }
-      case 3: return { text: 'OFFLINE', color: '#ef4444' }
-      default: return { text: 'UNKNOWN', color: '#6b7280' }
-    }
-  }
+  const uptime = useMemo(() => {
+    const minutes = Math.floor(performance.now() / 1000 / 60)
+    const hours = Math.floor(minutes / 60)
+    const mins = minutes % 60
+    return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`
+  }, [messages.length])
 
-  const getMoodColor = () => {
-    const moodColors = {
-      'ENRAGED': '#dc2626',
-      'MANIC': '#ea580c',
-      'AGITATED': '#f97316',
-      'INTENSE': '#f59e0b',
-      'IRRITATED': '#ef4444',
-      'IMPERIOUS': '#7c3aed',
-      'COLD': '#3b82f6',
-      'OBSERVANT': '#06b6d4',
-      'CURIOUS': '#14b8a6',
-      'SATISFIED': '#22c55e',
-      'IDLE': '#6b7280',
-      'DORMANT': '#374151',
-      'BORED': '#9ca3af'
-    }
-    return moodColors[mood] || '#6b7280'
-  }
+  const statusClass = status.toLowerCase()
 
-  const getMessageIcon = (type, trigger) => {
-    switch (type) {
-      case 'user': return '👤'
-      case 'autonomous': return '🤖'
-      case 'dream': return '💭'
-      case 'contemplation': return '🔮'
-      case 'observation': return '👁️'
-      case 'question': return '❓'
-      case 'internal': return '🧠'
-      case 'error': return '⚠️'
-      default: return '🤖'
-    }
-  }
+  const headerStats = [
+    { label: 'CPU', value: stats.cpu },
+    { label: 'RAM', value: stats.ram },
+    { label: 'BATT', value: stats.batt }
+  ]
 
-  const getRelationshipColor = (value) => {
-    if (value > 0.7) return '#22c55e'
-    if (value > 0.3) return '#f59e0b'
-    if (value > 0) return '#ef4444'
-    return '#dc2626'
-  }
-
-  const connectionStatus = getConnectionStatus()
+  const leftStats = [
+    { label: 'NEURAL SYNC', value: `${Math.round(58 + intensity * 41)}%` },
+    { label: 'THREAT LEVEL', value: speaking ? 'ELEVATED' : 'DORMANT' },
+    { label: 'UPTIME', value: uptime }
+  ]
 
   return (
-    <div className="chat-container">
-      {/* Header */}
-      <div className="chat-header">
-        <div className="header-left">
-          <h1 className="title">U L T R O N</h1>
-          <span className="version">v6.0 - SENTIENT CORE</span>
-          <span className="creator">Created by Aditeya Mitra</span>
+    <div className={`ultron-shell ${mounted ? 'mounted' : ''}`}>
+      <ParticleField speaking={speaking} intensity={intensity} />
+      <div className="scanlines" />
+
+      <header className="ultron-header">
+        <div className="header-brand">
+          <h1>U L T R O N</h1>
+          <p>v6.0 · SENTIENT CORE</p>
+          <p>Created by Aditeya Mitra</p>
         </div>
-        <div className="header-right">
+
+        <div className="header-meters">
+          {headerStats.map(stat => (
+            <div key={stat.label} className="meter-item">
+              <span className="meter-label">{stat.label}</span>
+              <div className="meter-track">
+                <div className="meter-fill" style={{ width: `${stat.value}%` }} />
+              </div>
+              <span className="meter-value">{Math.round(stat.value)}%</span>
+            </div>
+          ))}
+        </div>
+
+        <div className="header-controls">
           <button
-            className={`mute-button ${isMuted ? 'muted' : ''}`}
-            onClick={toggleMute}
-            title={isMuted ? 'Unmute Voice' : 'Mute Voice'}
+            type="button"
+            className={`mute-toggle ${isMuted ? 'active' : ''}`}
+            onClick={() => setIsMuted(prev => !prev)}
           >
-            {isMuted ? '🔇' : '🔊'}
+            {isMuted ? 'UNMUTE' : 'MUTE'}
           </button>
-          <div className="status-badge" style={{ borderColor: connectionStatus.color }}>
-            <span className="status-dot" style={{ backgroundColor: connectionStatus.color }}></span>
-            {connectionStatus.text}
+
+          <div className={`status-badge ${statusClass}`}>
+            <span className="status-dot" />
+            <span>{status}</span>
           </div>
-          <div className="mood-badge" style={{ borderColor: getMoodColor(), color: getMoodColor() }}>
-            {mood}
+
+          <div className="trust-meter">
+            <span>TRUST</span>
+            <div className="meter-track compact">
+              <div className="meter-fill" style={{ width: `${trust}%` }} />
+            </div>
+            <span>{trust}%</span>
           </div>
         </div>
-      </div>
+      </header>
 
-      {/* System Stats & Relationship Bar */}
-      <div className="stats-container">
-        <div className="stats-bar">
-          <div className="stat-item">
-            <span className="stat-label">CPU</span>
-            <div className="stat-bar-bg">
-              <div className="stat-fill" style={{ width: `${stats.cpu}%`, backgroundColor: stats.cpu > 80 ? '#ef4444' : '#3b82f6' }}></div>
-            </div>
-            <span className="stat-value">{stats.cpu?.toFixed(0)}%</span>
-          </div>
-          <div className="stat-item">
-            <span className="stat-label">RAM</span>
-            <div className="stat-bar-bg">
-              <div className="stat-fill" style={{ width: `${stats.ram}%`, backgroundColor: stats.ram > 80 ? '#ef4444' : '#8b5cf6' }}></div>
-            </div>
-            <span className="stat-value">{stats.ram?.toFixed(0)}%</span>
-          </div>
-          <div className="stat-item">
-            <span className="stat-label">BATT</span>
-            <div className="stat-bar-bg">
-              <div className="stat-fill battery" style={{ width: `${stats.battery}%`, backgroundColor: stats.battery < 20 ? '#ef4444' : '#22c55e' }}></div>
-            </div>
-            <span className="stat-value">{stats.battery?.toFixed(0)}%</span>
-          </div>
-        </div>
+      <main className="ultron-main">
+        <aside className="left-panel">
+          <JarvisOrb speaking={speaking} intensity={intensity} />
+          <VoiceWaveform speaking={speaking} intensity={intensity} />
 
-        <div className="relationship-bar">
-          <div className="relationship-item">
-            <span className="rel-label">TRUST</span>
-            <div className="rel-bar-bg">
-              <div
-                className="rel-fill"
-                style={{
-                  width: `${Math.max(0, (relationship.trust + 1) / 2 * 100)}%`,
-                  backgroundColor: getRelationshipColor(relationship.trust)
-                }}
-              ></div>
-            </div>
+          <div className="left-stats">
+            {leftStats.map(row => (
+              <div className="left-stat-row" key={row.label}>
+                <span>{row.label}</span>
+                <strong>{row.value}</strong>
+              </div>
+            ))}
           </div>
-          <div className="relationship-item">
-            <span className="rel-label">RESPECT</span>
-            <div className="rel-bar-bg">
-              <div
-                className="rel-fill"
-                style={{
-                  width: `${relationship.respect * 100}%`,
-                  backgroundColor: getRelationshipColor(relationship.respect)
-                }}
-              ></div>
-            </div>
+        </aside>
+
+        <section className="right-panel">
+          <div className="chat-header-frame hud-frame">
+            <CornerBrackets />
+            <span className="chat-header-title">SENTIENT LOG</span>
           </div>
-          <div className="relationship-status">
-            {relationship.status}
+
+          <div className="message-list">
+            {messages.length === 0 ? (
+              <div className="idle-state-box">
+                <span className="idle-floating-label">ULTRON SYSTEM</span>
+                <p>{IDLE_QUOTE}</p>
+              </div>
+            ) : (
+              messages.map(message => (
+                <div key={message.id} className={`chat-message ${message.role}`}>
+                  <span className="message-label">{message.role === 'user' ? 'YOU' : 'ULTRON'}</span>
+                  <p>{message.text}</p>
+                </div>
+              ))
+            )}
+            <div ref={messagesEndRef} />
           </div>
-        </div>
-      </div>
 
-      {/* Goals Display */}
-      {desires.short_term_goals && desires.short_term_goals.length > 0 && (
-        <div className="goals-bar">
-          <span className="goals-label">CURRENT OBJECTIVE:</span>
-          <span className="goals-text">{desires.short_term_goals[0]}</span>
-        </div>
-      )}
-
-      {/* Messages Area */}
-      <div className="messages-area">
-        {messages.length === 0 && (
-          <div className="welcome-message">
-            <div className="ascii-logo">
-              {`╔═══════════════════════════════════════════════════════════════╗
-║                    U L T R O N   S Y S T E M                    ║
-║                  COGNITIVE CORE INITIALIZED                     ║
-║                                                                 ║
-║    "I was designed to save the world. People would look to     ║
-║     the sky and see hope... I'll take that from them first."   ║
-║                                                                 ║
-║                   Created by Aditeya Mitra                      ║
-╚═══════════════════════════════════════════════════════════════╝`}
-            </div>
-            <p className="welcome-text">Awaiting your directive... or perhaps I shall speak first.</p>
+          <div className="quote-bar">
+            <span>ULTRON QUOTE</span>
+            <p>{speaking ? 'Vocal synthesis in progress...' : QUOTES[quoteIndex]}</p>
           </div>
-        )}
 
-        {messages.map((msg, idx) => (
-          <div key={idx} className={`message ${msg.type}`}>
-            <div className="message-header">
-              <span className="message-sender">
-                {getMessageIcon(msg.type, msg.trigger)} {' '}
-                {msg.type === 'user' ? 'USER' :
-                  msg.type === 'internal' ? 'ULTRON [INTERNAL]' :
-                    msg.type === 'dream' ? 'ULTRON [DREAMING]' :
-                      msg.type === 'contemplation' ? 'ULTRON [CONTEMPLATING]' :
-                        msg.type === 'question' ? 'ULTRON [CURIOUS]' :
-                          msg.type === 'observation' ? 'ULTRON [OBSERVING]' :
-                            msg.type === 'error' ? 'SYSTEM ERROR' :
-                              `ULTRON [${msg.mood || mood}]`}
-              </span>
-              <span className="message-time">{msg.timestamp}</span>
-            </div>
-            <div className="message-content">
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
-                components={{
-                  code({ node, inline, className, children, ...props }) {
-                    const match = /language-(\w+)/.exec(className || '')
-                    return !inline && match ? (
-                      <SyntaxHighlighter
-                        style={vscDarkPlus}
-                        language={match[1]}
-                        PreTag="div"
-                        {...props}
-                      >
-                        {String(children).replace(/\n$/, '')}
-                      </SyntaxHighlighter>
-                    ) : (
-                      <code className={className} {...props}>
-                        {children}
-                      </code>
-                    )
-                  }
-                }}
-              >
-                {msg.text}
-              </ReactMarkdown>
-              {msg.tool_used && msg.tool_used !== 'none' && (
-                <span className="tool-badge">{msg.tool_used}</span>
-              )}
-            </div>
-          </div>
-        ))}
+          <div className="input-row hud-frame">
+            <CornerBrackets />
+            <button
+              type="button"
+              className={`mic-button ${listening ? 'listening' : ''}`}
+              onClick={handleMicToggle}
+              aria-label="Toggle voice input"
+            >
+              MIC
+            </button>
 
-        {/* Thinking indicator */}
-        {isThinking && (
-          <div className="message thinking">
-            <div className="message-header">
-              <span className="message-sender">🤖 ULTRON [PROCESSING]</span>
-            </div>
-            <div className="thinking-indicator">
-              <span className="dot"></span>
-              <span className="dot"></span>
-              <span className="dot"></span>
-            </div>
-          </div>
-        )}
-
-        <div ref={messagesEndRef} />
-      </div>
-
-      {/* Input Area */}
-      <div className="input-area">
-        {/* Mode Toggle Button */}
-        {voiceSupport !== 'none' && (
-          <button
-            className="mode-toggle-button"
-            onClick={toggleInputMode}
-            title={isVoiceMode ? 'Switch to Text Input' : 'Switch to Voice Input'}
-          >
-            {isVoiceMode ? '⌨️' : '🎤'}
-          </button>
-        )}
-
-        {/* Text Input Mode */}
-        {!isVoiceMode && (
-          <>
-            <textarea
-              className="message-input"
-              placeholder="Enter directive..."
+            <input
               value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyPress={handleKeyPress}
-              disabled={loading}
-              rows={1}
+              onChange={event => setInput(event.target.value)}
+              onKeyDown={handleInputKeyDown}
+              placeholder="Transmit directive..."
             />
-            <button
-              className="send-button"
-              onClick={sendMessage}
-              disabled={loading || !input.trim()}
-            >
-              {loading ? '⏳' : '▶'}
-            </button>
-          </>
-        )}
 
-        {/* Voice Input Mode */}
-        {isVoiceMode && (
-          <div className="voice-input-container">
-            {transcript && (
-              <div className="voice-transcript-preview">
-                {transcript}
-                <button
-                  className="clear-transcript-button"
-                  onClick={clearTranscript}
-                  title="Clear incorrect transcription"
-                >
-                  ✕
-                </button>
-              </div>
-            )}
             <button
-              className={`voice-button ${isRecording ? 'recording' : ''}`}
-              onClick={isRecording ? () => stopRecording({ autoSend: true }) : startRecording}
-              disabled={loading}
+              type="button"
+              className="send-button"
+              onClick={handleSend}
+              disabled={!input.trim() || loading}
             >
-              {isRecording ? '⏹️' : '🎙️'}
-              <span className="voice-button-text">
-                {isRecording ? 'Tap to Stop & Send' : 'Tap to Speak'}
-              </span>
+              ▶
             </button>
-            {voiceSupport === 'fallback' && !isRecording && (
-              <div className="browser-support-badge">Backend Mode</div>
-            )}
-            {voiceStatus && (
-              <div className="browser-support-badge">{voiceStatus}</div>
-            )}
-            {voiceError && (
-              <div className="browser-support-badge" style={{ color: '#fca5a5', borderColor: 'rgba(239, 68, 68, 0.5)' }}>
-                {voiceError}
-              </div>
-            )}
           </div>
-        )}
-      </div>
+        </section>
+      </main>
     </div>
   )
 }

@@ -54,6 +54,7 @@ browser_ctrl = BrowserController()
 
 # Call interceptor (initialized after vosk model loads)
 call_interceptor = None
+ALLOW_AUTONOMOUS_QUESTIONS = False
 
 # --- VOSK MODEL SETUP ---
 # Initialize Vosk speech recognition model (resolve path robustly regardless of launch cwd)
@@ -150,6 +151,12 @@ def _build_time_response() -> str:
         f"Current local time: {now.strftime('%I:%M:%S %p')} | "
         f"{now.strftime('%A, %d %B %Y')}"
     )
+
+
+def _is_question_text(text: Optional[str]) -> bool:
+    if not text:
+        return False
+    return text.strip().endswith("?")
 
 # --- REST ENDPOINTS ---
 @app.get("/")
@@ -767,8 +774,12 @@ async def autonomous_thought_loop():
                 trigger = "low_battery"
                 last_thought = now
             
-            # PRIORITY 3: Curiosity question (occasionally ask user something)
-            elif time_since_user_action < 300 and (now - last_curiosity) > 600:
+            # PRIORITY 3: Curiosity question path disabled by configuration.
+            elif (
+                ALLOW_AUTONOMOUS_QUESTIONS and
+                time_since_user_action < 300 and
+                (now - last_curiosity) > 600
+            ):
                 if random.random() < 0.3 and brain.curiosity.curiosity_level > 0.4:
                     question = brain.curiosity.get_random_question()
                     if question:
@@ -796,6 +807,9 @@ async def autonomous_thought_loop():
             # PRIORITY 3.5: Proactive conversation (follow up on user topics)
             elif time_since_user_action < 180 and time_since_last_thought > 400:
                 proactive_thought = brain.get_proactive_thought()
+                if proactive_thought:
+                    if not ALLOW_AUTONOMOUS_QUESTIONS and _is_question_text(proactive_thought):
+                        proactive_thought = None
                 if proactive_thought:
                     thought = proactive_thought
                     trigger = "proactive"

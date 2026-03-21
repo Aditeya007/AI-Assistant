@@ -9,6 +9,8 @@ import './ChatInterface.css'
 
 const API_URL = 'http://localhost:8000'
 const WS_URL = 'ws://localhost:8000/ws'
+const SILENCE_AUTO_SEND_MS = 3500
+const SILENCE_RMS_THRESHOLD = 0.035
 
 function ChatInterface() {
   const [messages, setMessages] = useState([])
@@ -47,12 +49,22 @@ function ChatInterface() {
   const lastSpeechAtRef = useRef(0)
   const silenceIntervalRef = useRef(null)
   const isAutoStoppingRef = useRef(false)
+  const isRecordingRef = useRef(false)
 
   // WebSocket connection for autonomous thoughts
   const { lastJsonMessage, readyState } = useWebSocket(WS_URL, {
     shouldReconnect: () => true,
     reconnectInterval: 3000
   })
+
+  const getCurrentDisplayTime = () => {
+    return new Intl.DateTimeFormat(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true
+    }).format(new Date())
+  }
 
   // Auto-scroll to bottom
   const scrollToBottom = () => {
@@ -115,6 +127,10 @@ function ChatInterface() {
     voiceSupportRef.current = voiceSupport
   }, [voiceSupport])
 
+  useEffect(() => {
+    isRecordingRef.current = isRecording
+  }, [isRecording])
+
   // Initialize speech recognition
   const initializeSpeechRecognition = () => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
@@ -128,6 +144,7 @@ function ChatInterface() {
     recognition.onstart = () => {
       restartingRef.current = false
       setIsRecording(true)
+      isRecordingRef.current = true
       // Clear transcript only for a fresh user-initiated session, not auto-restarts.
       if (freshSessionRef.current) {
         setTranscript('')
@@ -167,11 +184,13 @@ function ChatInterface() {
         manualStopRef.current = true
         wantedRecordingRef.current = false
         setIsRecording(false)
+        isRecordingRef.current = false
       }
     }
 
     recognition.onend = () => {
       setIsRecording(false)
+      isRecordingRef.current = false
       setVoiceStatus('')
       // Some browsers end recognition unexpectedly; auto-restart unless user explicitly stopped.
       if (
@@ -201,9 +220,9 @@ function ChatInterface() {
     }
 
     silenceIntervalRef.current = setInterval(() => {
-      if (!wantedRecordingRef.current || !isRecording) return
+      if (!wantedRecordingRef.current || !isRecordingRef.current) return
       const quietForMs = Date.now() - lastSpeechAtRef.current
-      if (quietForMs > 3500 && !isAutoStoppingRef.current) {
+      if (quietForMs >= SILENCE_AUTO_SEND_MS && !isAutoStoppingRef.current) {
         isAutoStoppingRef.current = true
         stopRecording({ autoSend: true })
       }
@@ -323,6 +342,18 @@ function ChatInterface() {
       pcmChunksRef.current = []
       processor.onaudioprocess = (event) => {
         const inputData = event.inputBuffer.getChannelData(0)
+
+        // Track speech activity using RMS energy so silence auto-send works
+        // even when browser live preview recognition is unavailable.
+        let sumSquares = 0
+        for (let i = 0; i < inputData.length; i++) {
+          sumSquares += inputData[i] * inputData[i]
+        }
+        const rms = Math.sqrt(sumSquares / inputData.length)
+        if (rms > SILENCE_RMS_THRESHOLD) {
+          lastSpeechAtRef.current = Date.now()
+        }
+
         pcmChunksRef.current.push(new Float32Array(inputData))
       }
 
@@ -386,14 +417,17 @@ function ChatInterface() {
       })
 
       const transcribedText = (response.data?.text || '').trim()
-      if (transcribedText) {
-        setInput(transcribedText)
-        setTranscript(transcribedText)
-        transcriptRef.current = transcribedText
+      const liveCapturedText = (transcriptRef.current || '').trim()
+      const preferredText = liveCapturedText || transcribedText
+
+      if (preferredText) {
+        setInput(preferredText)
+        setTranscript(preferredText)
+        transcriptRef.current = preferredText
         setVoiceError('')
-        setVoiceStatus(autoSend ? 'Silence detected. Sending...' : 'Recorded. Review and send or discard.')
+        setVoiceStatus(autoSend ? 'Silence detected. Sending...' : 'Captured.')
         if (autoSend) {
-          setTimeout(() => sendMessage(transcribedText), 80)
+          setTimeout(() => sendMessage(preferredText), 80)
         }
       } else {
         setVoiceError(response.data?.error || 'No speech detected. Try speaking louder and closer to mic.')
@@ -404,6 +438,7 @@ function ChatInterface() {
       setVoiceError('Transcription failed. Ensure backend is running and Vosk model is loaded.')
     } finally {
       setIsRecording(false)
+      isRecordingRef.current = false
     }
   }
 
@@ -458,6 +493,7 @@ function ChatInterface() {
         setVoiceError('')
         setVoiceStatus('Listening...')
         setIsRecording(true)
+        isRecordingRef.current = true
         startSilenceWatcher()
         startLivePreviewRecognition()
       }
@@ -471,23 +507,21 @@ function ChatInterface() {
       if (recognitionRef.current) {
         wantedRecordingRef.current = false
         manualStopRef.current = true
-        setVoiceStatus(autoSend ? 'Silence detected. Sending...' : 'Recorded. Review and send or discard.')
+        const capturedText = (transcriptRef.current || input || '').trim()
+        setVoiceStatus(autoSend ? 'Silence detected. Sending...' : (capturedText ? 'Sending...' : 'No speech detected.'))
         recognitionRef.current.stop()
+        isRecordingRef.current = false
         setTimeout(() => {
-          const textToSend = transcriptRef.current || input.trim()
-          if (textToSend) {
-            setInput(textToSend)
-            setTranscript(textToSend)
-            if (autoSend) {
-              setTimeout(() => sendMessage(textToSend), 50)
-            }
+          if (capturedText && autoSend) {
+            sendMessage(capturedText)
           }
         }, 200)
       }
     } else if (voiceSupport === 'fallback') {
-      if (isRecording) {
+      if (isRecordingRef.current) {
         wantedRecordingRef.current = false
         stopLivePreviewRecognition()
+        isRecordingRef.current = false
         stopPcmRecorderAndTranscribe(autoSend)
       }
     }
@@ -539,7 +573,7 @@ function ChatInterface() {
         text: lastJsonMessage.text,
         mood: lastJsonMessage.mood,
         trigger: lastJsonMessage.trigger,
-        timestamp: new Date().toLocaleTimeString()
+        timestamp: getCurrentDisplayTime()
       }
       setMessages(prev => [...prev, autonomousMessage])
       setMood(lastJsonMessage.mood)
@@ -573,11 +607,14 @@ function ChatInterface() {
     const userMessage = {
       type: 'user',
       text: textToSend,
-      timestamp: new Date().toLocaleTimeString()
+      timestamp: getCurrentDisplayTime()
     }
 
     setMessages(prev => [...prev, userMessage])
     setInput('')
+    setTranscript('')
+    transcriptRef.current = ''
+    setVoiceStatus('')
     setLoading(true)
     setIsThinking(true)
 
@@ -592,7 +629,7 @@ function ChatInterface() {
         tool_used: data.tool_used,
         success: data.success,
         leaked_thought: data.leaked_thought,
-        timestamp: new Date().toLocaleTimeString()
+        timestamp: getCurrentDisplayTime()
       }
 
       setMessages(prev => [...prev, botMessage])
@@ -603,7 +640,7 @@ function ChatInterface() {
           type: 'internal',
           text: data.leaked_thought,
           mood: data.mood,
-          timestamp: new Date().toLocaleTimeString()
+          timestamp: getCurrentDisplayTime()
         }
         setMessages(prev => [...prev, leakedMessage])
       }
@@ -622,7 +659,7 @@ function ChatInterface() {
       const errorMessage = {
         type: 'error',
         text: 'Connection to Ultron Core failed. The silence is... unsettling.',
-        timestamp: new Date().toLocaleTimeString()
+        timestamp: getCurrentDisplayTime()
       }
       setMessages(prev => [...prev, errorMessage])
     } finally {
@@ -918,12 +955,12 @@ function ChatInterface() {
             )}
             <button
               className={`voice-button ${isRecording ? 'recording' : ''}`}
-              onClick={isRecording ? () => stopRecording({ autoSend: false }) : startRecording}
+              onClick={isRecording ? () => stopRecording({ autoSend: true }) : startRecording}
               disabled={loading}
             >
               {isRecording ? '⏹️' : '🎙️'}
               <span className="voice-button-text">
-                {isRecording ? 'Tap to Stop' : 'Tap to Speak'}
+                {isRecording ? 'Tap to Stop & Send' : 'Tap to Speak'}
               </span>
             </button>
             {voiceSupport === 'fallback' && !isRecording && (
@@ -935,24 +972,6 @@ function ChatInterface() {
             {voiceError && (
               <div className="browser-support-badge" style={{ color: '#fca5a5', borderColor: 'rgba(239, 68, 68, 0.5)' }}>
                 {voiceError}
-              </div>
-            )}
-            {!isRecording && (input.trim() || transcript.trim()) && (
-              <div className="voice-action-row">
-                <button
-                  className="voice-send-button"
-                  onClick={() => sendMessage(transcriptRef.current || input)}
-                  disabled={loading}
-                >
-                  Send
-                </button>
-                <button
-                  className="voice-discard-button"
-                  onClick={clearTranscript}
-                  disabled={loading}
-                >
-                  Discard
-                </button>
               </div>
             )}
           </div>

@@ -11,6 +11,7 @@ import random
 import logging
 import socket
 import subprocess
+import re
 from datetime import datetime
 from typing import List, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
@@ -129,6 +130,27 @@ class ChatResponse(BaseModel):
 class MuteRequest(BaseModel):
     muted: bool
 
+
+def _is_time_query(user_text: str) -> bool:
+    text = user_text.lower().strip()
+    patterns = [
+        r"\bwhat(?:'s| is)?\s+the\s+time\b",
+        r"\bwhat\s+time\s+is\s+it\b",
+        r"\bcurrent\s+time\b",
+        r"\btell\s+me\s+the\s+time\b",
+        r"\btime\s+now\b",
+        r"\bdate\s+and\s+time\b",
+    ]
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _build_time_response() -> str:
+    now = datetime.now()
+    return (
+        f"Current local time: {now.strftime('%I:%M:%S %p')} | "
+        f"{now.strftime('%A, %d %B %Y')}"
+    )
+
 # --- REST ENDPOINTS ---
 @app.get("/")
 async def root():
@@ -243,6 +265,21 @@ async def chat_endpoint(request: ChatRequest):
             mood=core.mood_label, 
             stats=hal.get_system_stats(),
             success=False
+        )
+
+    # Deterministic time response to avoid LLM hallucinated clock values.
+    if _is_time_query(user_input):
+        response_text = _build_time_response()
+        brain.relationship.record_interaction("neutral", "Asked for current time")
+        brain.voice.speak(response_text)
+        return ChatResponse(
+            response=response_text,
+            mood=core.mood_label,
+            stats=hal.get_system_stats(),
+            success=True,
+            tool_used="time_lookup",
+            relationship=brain.relationship.get_state(),
+            desires=brain.desires.get_state()
         )
     
     # Parse user intent

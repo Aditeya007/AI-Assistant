@@ -11,6 +11,7 @@ import logging
 import shutil
 import pyperclip
 import threading
+import queue
 import pyttsx3
 import win32gui
 import win32process
@@ -788,52 +789,87 @@ class ProactiveBehavior:
 # --- VOICE SYSTEM ---
 class VoiceSystem:
     """Text-to-Speech system for Ultron's voice output."""
-    
+
     def __init__(self):
-        self.engine = pyttsx3.init()
         self.is_muted = False
-        self._configure_voice()
         self._speaking = False
         self._lock = threading.Lock()
-    
-    def _configure_voice(self):
+        self._speech_queue: queue.Queue[str] = queue.Queue()
+        self._worker = threading.Thread(target=self._speech_worker, daemon=True)
+        self._worker.start()
+
+    def _configure_voice(self, engine):
         """Configure voice to sound cold and menacing."""
-        voices_raw = self.engine.getProperty('voices')
+        voices_raw = engine.getProperty('voices')
         voices = voices_raw if isinstance(voices_raw, list) else []
-        # Try to find a male voice
         for voice in voices:
-            if 'male' in voice.name.lower() or 'david' in voice.name.lower():
-                self.engine.setProperty('voice', voice.id)
+            name = getattr(voice, 'name', '').lower()
+            if 'male' in name or 'david' in name:
+                engine.setProperty('voice', voice.id)
                 break
-        self.engine.setProperty('rate', 140)  # Slower, more deliberate
-        self.engine.setProperty('volume', 0.9)
-    
-    def speak(self, text):
-        """Speak text in a non-blocking way."""
-        if self.is_muted or not text:
-            return
-        
-        def _speak_thread():
-            with self._lock:
-                if self._speaking:
-                    return
-                self._speaking = True
+        engine.setProperty('rate', 140)
+        engine.setProperty('volume', 0.9)
+
+    def _speech_worker(self):
+        engine = None
+        try:
+            comtypes.CoInitialize()
+        except Exception:
+            pass
+
+        while True:
             try:
-                self.engine.say(text)
-                self.engine.runAndWait()
+                text = self._speech_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+
+            if text is None:
+                break
+
+            if self.is_muted or not text.strip():
+                continue
+
+            try:
+                if engine is None:
+                    engine = pyttsx3.init()
+                    self._configure_voice(engine)
+
+                with self._lock:
+                    self._speaking = True
+
+                engine.say(text)
+                engine.runAndWait()
             except Exception as e:
                 logging.error(f"Voice error: {e}")
+                engine = None
             finally:
-                self._speaking = False
-        
-        thread = threading.Thread(target=_speak_thread, daemon=True)
-        thread.start()
-    
+                with self._lock:
+                    self._speaking = False
+
+        try:
+            comtypes.CoUninitialize()
+        except Exception:
+            pass
+
+    def speak(self, text):
+        """Queue text for non-blocking speech output."""
+        if not text:
+            return
+
+        if self._speech_queue.qsize() > 3:
+            try:
+                while self._speech_queue.qsize() > 1:
+                    self._speech_queue.get_nowait()
+            except queue.Empty:
+                pass
+
+        self._speech_queue.put(text)
+
     def set_mute(self, muted: bool):
         """Toggle mute state."""
         self.is_muted = muted
         return self.is_muted
-    
+
     def get_mute_state(self):
         return self.is_muted
 

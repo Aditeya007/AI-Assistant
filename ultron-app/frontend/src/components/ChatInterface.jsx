@@ -63,6 +63,25 @@ function ChatInterface() {
   }, [])
 
   useEffect(() => {
+    const fetchMuteState = async () => {
+      try {
+        const response = await fetch(`${BACKEND_URL}/mute`)
+        if (!response.ok) {
+          return
+        }
+        const data = await response.json()
+        if (typeof data?.muted === 'boolean') {
+          setIsMuted(data.muted)
+        }
+      } catch {
+        // Keep local default if backend mute state is temporarily unavailable.
+      }
+    }
+
+    fetchMuteState()
+  }, [])
+
+  useEffect(() => {
     const statTimer = setInterval(() => {
       setStats(prev => ({
         cpu: clamp(prev.cpu + (Math.random() * 18 - 9), 14, 94),
@@ -184,15 +203,27 @@ function ChatInterface() {
     }, estimatedDuration)
   }
 
-  const postSpeak = async text => {
+  const handleMuteToggle = async () => {
+    const nextMuted = !isMuted
+    setIsMuted(nextMuted)
+
     try {
-      await fetch(`${BACKEND_URL}/speak`, {
+      const response = await fetch(`${BACKEND_URL}/mute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text })
+        body: JSON.stringify({ muted: nextMuted })
       })
+
+      if (!response.ok) {
+        throw new Error('mute_sync_failed')
+      }
+
+      const data = await response.json()
+      if (typeof data?.muted === 'boolean') {
+        setIsMuted(data.muted)
+      }
     } catch {
-      // Fire-and-forget endpoint failures should not interrupt reply flow.
+      setIsMuted(!nextMuted)
     }
   }
 
@@ -240,9 +271,6 @@ function ChatInterface() {
       setTrust(prev => clamp(prev + 2, 0, 100))
       runSpeechWindow(replyText)
 
-      if (!isMuted) {
-        await postSpeak(replyText)
-      }
     } catch {
       setStatus('OFFLINE')
       setMessages(prev => [
@@ -314,7 +342,7 @@ function ChatInterface() {
           <button
             type="button"
             className={`mute-toggle ${isMuted ? 'active' : ''}`}
-            onClick={() => setIsMuted(prev => !prev)}
+            onClick={handleMuteToggle}
           >
             {isMuted ? 'UNMUTE' : 'MUTE'}
           </button>

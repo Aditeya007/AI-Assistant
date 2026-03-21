@@ -55,6 +55,7 @@ browser_ctrl = BrowserController()
 # Call interceptor (initialized after vosk model loads)
 call_interceptor = None
 ALLOW_AUTONOMOUS_QUESTIONS = False
+ENABLE_AUTONOMOUS_MESSAGES = False
 
 # --- VOSK MODEL SETUP ---
 # Initialize Vosk speech recognition model (resolve path robustly regardless of launch cwd)
@@ -613,7 +614,8 @@ async def startup_event():
     # Auto-launch Chrome with debug port if not already running
     _ensure_chrome_debug_mode()
     
-    asyncio.create_task(autonomous_thought_loop())
+    if ENABLE_AUTONOMOUS_MESSAGES:
+        asyncio.create_task(autonomous_thought_loop())
     asyncio.create_task(activity_monitor_loop())
     
     # Start Call Interceptor
@@ -639,6 +641,8 @@ async def startup_event():
     logging.info(f"Created by {CREATOR['name']}")
     logging.info("Call Interceptor: ACTIVE")
     logging.info("Browser Controller: READY (connect Chrome with --remote-debugging-port=9222)")
+    if not ENABLE_AUTONOMOUS_MESSAGES:
+        logging.info("Autonomous broadcast loop: DISABLED")
 
 async def call_event_broadcast_loop(queue):
     """Broadcasts call interceptor events via WebSocket."""

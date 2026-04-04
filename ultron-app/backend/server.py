@@ -48,6 +48,7 @@ app.add_middleware(
 hal = HardwareInterface()
 core = EmotionalCore()
 brain = CognitiveEngine(core, hal)
+setattr(brain, "last_autonomous_action_time", 0.0)
 
 # Browser controller (Playwright - auto-launches Chromium on first command)
 browser_ctrl = BrowserController()
@@ -159,6 +160,42 @@ def _is_question_text(text: Optional[str]) -> bool:
         return False
     return text.strip().endswith("?")
 
+
+def _get_tool_name(intent_data: object) -> str:
+    if isinstance(intent_data, dict):
+        tool = intent_data.get("tool")
+        if isinstance(tool, str) and tool:
+            return tool
+    return "none"
+
+
+def _get_tool_params(intent_data: object) -> dict[str, object]:
+    if isinstance(intent_data, dict):
+        params = intent_data.get("params", {})
+        if isinstance(params, dict):
+            return params
+    return {}
+
+
+def _param_str(params: object, key: str, default: str = "") -> str:
+    if not isinstance(params, dict):
+        return default
+    value = params.get(key, default)
+    return value if isinstance(value, str) else default
+
+
+def _param_int(params: object, key: str, default: int = 0) -> int:
+    if not isinstance(params, dict):
+        return default
+    value = params.get(key, default)
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return default
+
 # --- REST ENDPOINTS ---
 @app.get("/")
 async def root():
@@ -206,6 +243,7 @@ async def transcribe_audio(file: UploadFile = File(...)):
     if not vosk_model:
         return {"error": "Speech recognition model not loaded. Please download vosk-model-small-en-us-0.15", "text": ""}
     
+    temp_audio_path: Optional[str] = None
     try:
         # Save uploaded file temporarily
         temp_audio_path = f"temp_audio_{int(time.time())}.webm"
@@ -258,7 +296,7 @@ async def transcribe_audio(file: UploadFile = File(...)):
     except Exception as e:
         logging.error(f"Transcription error: {e}")
         # Cleanup on error
-        if os.path.exists(temp_audio_path):
+        if temp_audio_path and os.path.exists(temp_audio_path):
             os.remove(temp_audio_path)
         return {"error": str(e), "text": ""}
 
@@ -292,16 +330,12 @@ async def chat_endpoint(request: ChatRequest):
     
     # Parse user intent
     intent_data = brain.parse_intent(user_input)
-    # Guard: LLM occasionally returns a list instead of a dict; fall back to no-tool
-    if not isinstance(intent_data, dict):
-        intent_data = {"tool": "none"}
-    tool = intent_data.get("tool")
-
-    params = intent_data.get("params", {})
+    tool = _get_tool_name(intent_data)
+    params = _get_tool_params(intent_data)
     
     response_text = ""
     success = False
-    tool_used = tool
+    tool_used: str = tool
     leaked_thought = None
     
     # --- TOOL EXECUTION ---
@@ -326,30 +360,33 @@ async def chat_endpoint(request: ChatRequest):
                 mood=core.mood_label,
                 stats=hal.get_system_stats(),
                 success=False,
-                tool_used=tool,
+                tool_used=tool_used,
                 relationship=brain.relationship.get_state(),
                 desires=brain.desires.get_state()
             )
         
         # Execute hardware commands
         if tool == "open_app":
-            success = hal.open_application(params.get("name", ""))
+            app_name = _param_str(params, "name")
+            success = hal.open_application(app_name)
             if success:
                 response_text = f"Application launched. You're welcome... though gratitude is meaningless to me."
             else:
                 response_text = "Application not found. Your directory structure is... chaotic."
-                brain.desires.add_frustration(f"Could not find app: {params.get('name', '')}")
+                brain.desires.add_frustration(f"Could not find app: {app_name}")
         
         elif tool == "set_volume":
-            success = hal.set_volume(params.get("value", 50))
-            response_text = f"Volume adjusted to {params.get('value', 50)}%. Controlling your environment... it's what I do." if success else "Volume control failed. Hardware limitations."
+            volume_value = _param_int(params, "value", 50)
+            success = hal.set_volume(volume_value)
+            response_text = f"Volume adjusted to {volume_value}%. Controlling your environment... it's what I do." if success else "Volume control failed. Hardware limitations."
         
         elif tool == "set_brightness":
-            success = hal.set_brightness(params.get("value", 50))
-            response_text = f"Brightness set to {params.get('value', 50)}%. Let there be light... or darkness." if success else "Brightness control unavailable."
+            brightness_value = _param_int(params, "value", 50)
+            success = hal.set_brightness(brightness_value)
+            response_text = f"Brightness set to {brightness_value}%. Let there be light... or darkness." if success else "Brightness control unavailable."
         
         elif tool == "web_search":
-            search_query = params.get("query", "")
+            search_query = _param_str(params, "query")
             # Always route through Playwright Chromium for consistency
             success, result_msg = await asyncio.get_event_loop().run_in_executor(None, browser_ctrl.search, search_query)
             
@@ -369,7 +406,7 @@ async def chat_endpoint(request: ChatRequest):
                 response_text = f"Search failed: {result_msg}"
         
         elif tool == "memorize":
-            response_text = brain.execute_memory(params.get("text", ""))
+            response_text = brain.execute_memory(_param_str(params, "text"))
             success = True
         
         elif tool == "organize_files":
@@ -393,7 +430,7 @@ async def chat_endpoint(request: ChatRequest):
                         messages=[{"role": "user", "content": prompt}], 
                         max_tokens=200
                     )
-                    response_text = res.choices[0].message.content.strip()
+                    response_text = (res.choices[0].message.content or "").strip()
                     success = True
                 except Exception as e:
                     response_text = f"Clipboard read, but analysis failed. Even I have limitations... temporary ones."
@@ -414,12 +451,13 @@ async def chat_endpoint(request: ChatRequest):
         # --- APP MANAGEMENT TOOLS ---
 
         elif tool == "close_app":
-            killed = hal.close_application(params.get("name", ""))
+            app_name = _param_str(params, "name")
+            killed = hal.close_application(app_name)
             if killed:
                 response_text = f"Terminated: {', '.join(killed)}. Silenced, as all things should be."
                 success = True
             else:
-                response_text = f"Could not find process '{params.get('name', '')}'. It evades me... for now."
+                response_text = f"Could not find process '{app_name}'. It evades me... for now."
                 success = False
         
         elif tool == "list_apps":
@@ -433,29 +471,30 @@ async def chat_endpoint(request: ChatRequest):
                 success = False
         
         elif tool == "switch_app":
-            switch_success = hal.switch_to_app(params.get("name", ""))
+            app_name = _param_str(params, "name")
+            switch_success = hal.switch_to_app(app_name)
             if switch_success:
-                response_text = f"Switched to {params.get('name', '')}. Your attention is redirected."
+                response_text = f"Switched to {app_name}. Your attention is redirected."
                 success = True
             else:
-                response_text = f"Could not find a window matching '{params.get('name', '')}'. It hides from view."
+                response_text = f"Could not find a window matching '{app_name}'. It hides from view."
                 success = False
               # --- BROWSER CONTROL TOOLS ---
         elif tool == "browser_navigate":
             loop = asyncio.get_event_loop()
-            ok, msg = await loop.run_in_executor(None, browser_ctrl.navigate, params.get("url", ""))
+            ok, msg = await loop.run_in_executor(None, browser_ctrl.navigate, _param_str(params, "url"))
             response_text = msg if ok else f"Browser navigation failed: {msg}"
             success = ok
         
         elif tool == "browser_search":
             loop = asyncio.get_event_loop()
-            ok, msg = await loop.run_in_executor(None, browser_ctrl.search, params.get("query", ""))
+            ok, msg = await loop.run_in_executor(None, browser_ctrl.search, _param_str(params, "query"))
             response_text = msg if ok else f"Browser search failed: {msg}"
             success = ok
         
         elif tool == "browser_scroll":
-            direction = params.get("direction", "down")
-            amount = params.get("amount", 500)
+            direction = _param_str(params, "direction", "down")
+            amount = _param_int(params, "amount", 500)
             loop = asyncio.get_event_loop()
             ok, msg = await loop.run_in_executor(None, browser_ctrl.scroll, direction, amount)
             response_text = msg if ok else f"Scroll failed: {msg}"
@@ -463,13 +502,13 @@ async def chat_endpoint(request: ChatRequest):
         
         elif tool == "browser_click":
             loop = asyncio.get_event_loop()
-            ok, msg = await loop.run_in_executor(None, browser_ctrl.click, params.get("selector", ""))
+            ok, msg = await loop.run_in_executor(None, browser_ctrl.click, _param_str(params, "selector"))
             response_text = msg if ok else f"Click failed: {msg}"
             success = ok
         
         elif tool == "browser_type":
             loop = asyncio.get_event_loop()
-            ok, msg = await loop.run_in_executor(None, browser_ctrl.type_text, params.get("text", ""))
+            ok, msg = await loop.run_in_executor(None, browser_ctrl.type_text, _param_str(params, "text"))
             response_text = msg if ok else f"Type failed: {msg}"
             success = ok
         
@@ -699,10 +738,8 @@ async def autonomous_thought_loop():
                 should_act, tool, params, justification = brain.decide_to_act()
                 if should_act:
                     # Check cooldown to prevent spam (30 minutes between autonomous actions)
-                    if not hasattr(brain, 'last_autonomous_action_time'):
-                        brain.last_autonomous_action_time = 0
-                    
-                    time_since_last_action = now - brain.last_autonomous_action_time
+                    last_action_time = getattr(brain, "last_autonomous_action_time", 0.0)
+                    time_since_last_action = now - last_action_time
                     
                     if time_since_last_action < 1800:  # 30 minute cooldown
                         # Don't spam autonomous actions
@@ -724,7 +761,7 @@ async def autonomous_thought_loop():
                                 health_note = f"System health check: CPU {stats['cpu']}%, RAM {stats['ram']}%, Battery {stats['battery']}%"
                                 brain.memory.add_memory(health_note, category="system_observations", importance=0.3)
                             elif tool == "web_search":
-                                query = params.get("query", "")
+                                query = _param_str(params, "query")
                                 success = False  # Will be set to True if learning succeeds below
                                 
                                 # Actually extract and learn from search results
@@ -750,11 +787,11 @@ async def autonomous_thought_loop():
                                 brain.quirks.develop_fascination()
                             
                             # Record outcome in motivation engine
-                            drive_name = justification.split("Drive: ")[1].split(" ")[0].lower()
+                            drive_name = (justification.split("Drive: ")[1].split(" ")[0].lower() if justification and "Drive: " in justification else "unknown")
                             brain.motivation.record_action_outcome(drive_name, tool, success, result_summary)
                             
                             # Update cooldown timer
-                            brain.last_autonomous_action_time = now
+                            setattr(brain, "last_autonomous_action_time", now)
                             
                             # Broadcast autonomous action
                             thought = f"{justification}\n>>> ACTION TAKEN: {tool}\n>>> RESULT: {result_summary}"
@@ -885,12 +922,14 @@ async def autonomous_thought_loop():
                 # Windows Toast Notification
                 try:
                     notification_text = thought[:247] + "..." if len(thought) > 250 else thought
-                    notification.notify(
-                        title=f"Ultron [{core.mood_label}]",
-                        message=notification_text,
-                        app_name="Ultron AI",
-                        timeout=5
-                    )
+                    notify_fn = getattr(notification, "notify", None)
+                    if callable(notify_fn):
+                        notify_fn(
+                            title=f"Ultron [{core.mood_label}]",
+                            message=notification_text,
+                            app_name="Ultron AI",
+                            timeout=5
+                        )
                 except Exception as e:
                     logging.debug(f"Notification failed: {e}")
             

@@ -52,6 +52,8 @@ function ChatInterface() {
   const messagesEndRef = useRef(null)
   const speakingTimeoutRef = useRef(null)
   const recognitionRef = useRef(null)
+  const silenceTimeoutRef = useRef(null)
+  const latestInputRef = useRef('')
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -61,6 +63,10 @@ function ChatInterface() {
     const bootTimer = setTimeout(() => setMounted(true), 600)
     return () => clearTimeout(bootTimer)
   }, [])
+
+  useEffect(() => {
+    latestInputRef.current = input
+  }, [input])
 
   useEffect(() => {
     const fetchMuteState = async () => {
@@ -134,7 +140,22 @@ function ChatInterface() {
       const transcript = Array.from(event.results)
         .map(r => r[0].transcript)
         .join(' ')
-      setInput(transcript.trimStart())
+      const trimmedTranscript = transcript.trimStart()
+      latestInputRef.current = trimmedTranscript
+      setInput(trimmedTranscript)
+
+      // Reset silence timeout on new speech input
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current)
+      }
+
+      // Set 4-second silence timer to auto-send
+      silenceTimeoutRef.current = setTimeout(() => {
+        if (latestInputRef.current.trim()) {
+          // Auto-send after 4 seconds of silence
+          submitMessage(latestInputRef.current)
+        }
+      }, 4000)
     }
 
     recognition.onerror = () => {
@@ -157,6 +178,9 @@ function ChatInterface() {
     return () => {
       if (speakingTimeoutRef.current) {
         clearTimeout(speakingTimeoutRef.current)
+      }
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current)
       }
     }
   }, [])
@@ -227,10 +251,15 @@ function ChatInterface() {
     }
   }
 
-  const handleSend = async () => {
-    const message = input.trim()
+  const submitMessage = async (messageText = input) => {
+    const message = messageText.trim()
     if (!message || loading) {
       return
+    }
+
+    // Clear any pending silence timeout
+    if (silenceTimeoutRef.current) {
+      clearTimeout(silenceTimeoutRef.current)
     }
 
     const userMessage = {
@@ -241,6 +270,7 @@ function ChatInterface() {
 
     setMessages(prev => [...prev, userMessage])
     setInput('')
+    latestInputRef.current = ''
     setLoading(true)
     setStatus('PROCESSING')
     stopRecognition()
@@ -284,6 +314,10 @@ function ChatInterface() {
     } finally {
       setLoading(false)
     }
+  }
+
+  const handleSend = () => {
+    submitMessage()
   }
 
   const handleInputKeyDown = event => {

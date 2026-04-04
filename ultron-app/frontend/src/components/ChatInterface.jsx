@@ -49,11 +49,17 @@ function ChatInterface() {
   const [quoteIndex, setQuoteIndex] = useState(0)
   const [trust, setTrust] = useState(38)
   const [stats, setStats] = useState({ cpu: 21, ram: 48, batt: 86 })
+  const [voiceModeEnabled, setVoiceModeEnabled] = useState(true)
   const messagesEndRef = useRef(null)
   const speakingTimeoutRef = useRef(null)
   const recognitionRef = useRef(null)
   const silenceTimeoutRef = useRef(null)
   const latestInputRef = useRef('')
+  const restartRecognitionTimeoutRef = useRef(null)
+  const voiceModeEnabledRef = useRef(true)
+  const speakingRef = useRef(false)
+  const loadingRef = useRef(false)
+  const listeningRef = useRef(false)
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -67,6 +73,22 @@ function ChatInterface() {
   useEffect(() => {
     latestInputRef.current = input
   }, [input])
+
+  useEffect(() => {
+    voiceModeEnabledRef.current = voiceModeEnabled
+  }, [voiceModeEnabled])
+
+  useEffect(() => {
+    speakingRef.current = speaking
+  }, [speaking])
+
+  useEffect(() => {
+    loadingRef.current = loading
+  }, [loading])
+
+  useEffect(() => {
+    listeningRef.current = listening
+  }, [listening])
 
   useEffect(() => {
     const fetchMuteState = async () => {
@@ -126,6 +148,21 @@ function ChatInterface() {
   }, [speaking])
 
   useEffect(() => {
+    if (!voiceModeEnabled) {
+      stopRecognition()
+      return undefined
+    }
+
+    if (speaking || loading) {
+      stopRecognition()
+      return undefined
+    }
+
+    ensureVoiceListening(true)
+    return undefined
+  }, [speaking, loading, voiceModeEnabled])
+
+  useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
     if (!SpeechRecognition) {
       return undefined
@@ -160,15 +197,26 @@ function ChatInterface() {
 
     recognition.onerror = () => {
       setListening(false)
+      if (voiceModeEnabledRef.current) {
+        ensureVoiceListening(true)
+      }
     }
 
     recognition.onend = () => {
       setListening(false)
+      if (voiceModeEnabledRef.current && !speakingRef.current && !loadingRef.current) {
+        ensureVoiceListening(true)
+      }
     }
 
     recognitionRef.current = recognition
 
+    ensureVoiceListening(true)
+
     return () => {
+      if (restartRecognitionTimeoutRef.current) {
+        clearTimeout(restartRecognitionTimeoutRef.current)
+      }
       recognition.stop()
       recognitionRef.current = null
     }
@@ -182,19 +230,43 @@ function ChatInterface() {
       if (silenceTimeoutRef.current) {
         clearTimeout(silenceTimeoutRef.current)
       }
+      if (restartRecognitionTimeoutRef.current) {
+        clearTimeout(restartRecognitionTimeoutRef.current)
+      }
     }
   }, [])
 
+  const ensureVoiceListening = (retry = false) => {
+    if (!voiceModeEnabledRef.current || speakingRef.current || loadingRef.current || listeningRef.current) {
+      return false
+    }
+
+    if (restartRecognitionTimeoutRef.current) {
+      clearTimeout(restartRecognitionTimeoutRef.current)
+    }
+
+    const started = startRecognition()
+    if (!started && retry) {
+      restartRecognitionTimeoutRef.current = setTimeout(() => {
+        ensureVoiceListening(true)
+      }, 400)
+    }
+
+    return started
+  }
+
   const startRecognition = () => {
     if (!recognitionRef.current) {
-      return
+      return false
     }
 
     try {
       recognitionRef.current.start()
       setListening(true)
+      return true
     } catch {
       setListening(false)
+      return false
     }
   }
 
@@ -207,11 +279,16 @@ function ChatInterface() {
   }
 
   const handleMicToggle = () => {
-    if (listening) {
+    const nextEnabled = !voiceModeEnabled
+    voiceModeEnabledRef.current = nextEnabled
+    setVoiceModeEnabled(nextEnabled)
+
+    if (!nextEnabled) {
       stopRecognition()
       return
     }
-    startRecognition()
+
+    ensureVoiceListening(true)
   }
 
   const runSpeechWindow = text => {
@@ -273,7 +350,6 @@ function ChatInterface() {
     latestInputRef.current = ''
     setLoading(true)
     setStatus('PROCESSING')
-    stopRecognition()
 
     try {
       const response = await fetch(`${BACKEND_URL}/chat`, {
@@ -447,7 +523,7 @@ function ChatInterface() {
               onClick={handleMicToggle}
               aria-label="Toggle voice input"
             >
-              MIC
+              {voiceModeEnabled ? (listening ? 'LISTENING' : 'MIC') : 'PAUSED'}
             </button>
 
             <input
